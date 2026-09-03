@@ -168,15 +168,14 @@ function ChatRoom({ roomId }: { roomId: string }) {
               </div>
               <div className="flex items-center gap-1.5 mt-1">
                 <span className={cn("w-2 h-2 rounded-full", {
-                  "bg-amber-400 animate-pulse": status === "connecting" || status === "waiting" || status === "negotiating",
+                  "bg-amber-400 animate-pulse": status === "connecting" || status === "waiting",
                   "bg-green-500": status === "connected",
                   "bg-rose-500": status === "disconnected"
                 })} />
                 <span className="text-[10px] text-slate-500 font-medium uppercase tracking-tighter">
-                  {status === "connected" && "Direct WebRTC Connection (Active)"}
+                  {status === "connected" && "Connected (Relay Active)"}
                   {status === "waiting" && "Waiting for peer..."}
-                  {status === "connecting" && "Connecting to signaling..."}
-                  {status === "negotiating" && "Establishing encrypted tunnel..."}
+                  {status === "connecting" && "Connecting..."}
                   {status === "disconnected" && "Disconnected"}
                 </span>
               </div>
@@ -184,17 +183,17 @@ function ChatRoom({ roomId }: { roomId: string }) {
           </div>
 
           <div className="flex items-center gap-2 sm:gap-3">
-            <div className="hidden md:flex items-center px-3 py-1 bg-emerald-50 text-emerald-700 border border-emerald-100 rounded-full text-[10px] font-bold">
-              <ShieldCheck size={12} className="mr-1" /> END-TO-END ENCRYPTED
+            <div className="hidden md:flex items-center px-3 py-1 bg-sky-50 text-sky-700 border border-sky-100 rounded-full text-[10px] font-bold">
+              <ShieldCheck size={12} className="mr-1" /> CLOUDFLARE EDGE RELAY
             </div>
-            
-            {status !== "connected" && (
+
+            {(status === "disconnected" || status === "connecting") && (
               <button
                 onClick={retryConnection}
-                title="Retry WebRTC Connection"
+                title="Reconnect"
                 className="p-1.5 text-slate-500 hover:text-indigo-600 hover:bg-slate-100 rounded-lg transition-colors border border-slate-200 text-xs flex items-center gap-1"
               >
-                <RefreshCw size={14} className={cn({ "animate-spin": status === "negotiating" })} />
+                <RefreshCw size={14} className={cn({ "animate-spin": status === "connecting" })} />
                 <span className="hidden sm:inline">Retry</span>
               </button>
             )}
@@ -221,15 +220,13 @@ function ChatRoom({ roomId }: { roomId: string }) {
               <div className="space-y-2">
                 <h3 className="text-lg font-semibold text-slate-800">
                   {status === "waiting" && "Scan or Share Link"}
-                  {status === "connecting" && "Connecting to Server..."}
-                  {status === "negotiating" && "Connecting to Peer..."}
-                  {status === "disconnected" && "Connection Lost"}
+                  {status === "connecting" && "Connecting..."}
+                  {status === "disconnected" && "Peer Disconnected"}
                 </h3>
                 <p className="text-xs sm:text-sm text-slate-500 leading-relaxed">
-                  {status === "waiting" && "Share this QR code or room link with another device. Once opened, WebRTC negotiates a direct peer-to-peer tunnel."}
-                  {status === "connecting" && "Joining signaling room. Please wait a moment..."}
-                  {status === "negotiating" && "Peer detected! Handshaking encryption keys and establishing direct P2P data connection..."}
-                  {status === "disconnected" && "The peer disconnected or connection could not be established. Tap below to retry."}
+                  {status === "waiting" && "Share this QR code or room link with another device. Chat starts instantly once they join."}
+                  {status === "connecting" && "Connecting to relay server. Please wait a moment..."}
+                  {status === "disconnected" && "Your chat partner left the room. Share the link again to invite someone new."}
                 </p>
               </div>
 
@@ -238,7 +235,7 @@ function ChatRoom({ roomId }: { roomId: string }) {
                   onClick={retryConnection}
                   className="px-4 py-2 bg-indigo-600 text-white text-xs font-medium rounded-xl hover:bg-indigo-700 shadow-md shadow-indigo-200 flex items-center gap-1.5"
                 >
-                  <RefreshCw size={14} /> Reconnect P2P
+                  <RefreshCw size={14} /> Reconnect
                 </button>
               ) : (
                 <button

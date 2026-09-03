@@ -1,5 +1,10 @@
 ﻿import type * as Party from "partykit/server";
 
+/**
+ * ChatSignalingServer — Pure relay server via PartyKit WebSocket.
+ * No WebRTC signaling needed. All messages relay directly through
+ * Cloudflare Edge for <30ms latency globally.
+ */
 export default class ChatSignalingServer implements Party.Server {
   constructor(readonly room: Party.Room) {}
 
@@ -9,18 +14,17 @@ export default class ChatSignalingServer implements Party.Server {
 
     console.log(`[PartyKit] +conn ${conn.id} room="${this.room.id}" peers=${numClients}`);
 
-    // Reject if room is already full (only 2 peers allowed)
     if (numClients > 2) {
       conn.send(JSON.stringify({ type: "room-full" }));
       conn.close(4000, "room-full");
       return;
     }
 
-    // Tell the new peer how many others are in the room
-    conn.send(JSON.stringify({ type: "room-joined", numClients }));
+    // Tell the joining peer their room info
+    conn.send(JSON.stringify({ type: "room-joined", numClients, peerId: conn.id }));
 
-    // Notify existing peers that a new peer joined
-    if (numClients === 2) {
+    // Tell everyone else that a peer joined
+    if (numClients >= 2) {
       this.room.broadcast(
         JSON.stringify({ type: "peer-joined", peerId: conn.id }),
         [conn.id]
@@ -31,8 +35,8 @@ export default class ChatSignalingServer implements Party.Server {
   onMessage(message: string, sender: Party.Connection) {
     try {
       const data = JSON.parse(message);
-      console.log(`[PartyKit] msg "${data.type}" from ${sender.id}`);
-      // Relay all signaling (ready, offer, answer, candidate) to other peers
+      console.log(`[PartyKit] relay "${data.type}" from ${sender.id}`);
+      // Relay everything to all other peers
       this.room.broadcast(message, [sender.id]);
     } catch {
       console.warn("[PartyKit] Non-JSON message ignored");
@@ -40,7 +44,7 @@ export default class ChatSignalingServer implements Party.Server {
   }
 
   onClose(conn: Party.Connection) {
-    console.log(`[PartyKit] -conn ${conn.id} left room "${this.room.id}"`);
+    console.log(`[PartyKit] -conn ${conn.id} left room="${this.room.id}"`);
     this.room.broadcast(
       JSON.stringify({ type: "peer-disconnected", peerId: conn.id }),
       [conn.id]
