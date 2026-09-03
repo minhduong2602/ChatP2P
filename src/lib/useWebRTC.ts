@@ -246,11 +246,17 @@ export function useWebRTC(roomId: string | null) {
 
     setStatus("connecting");
 
-    // Connect to signaling server with automatic reconnects
-    const socket = io({
-      transports: ["polling", "websocket"],
-      reconnectionAttempts: 5,
-      timeout: 10000
+    // Connect to signaling server with automatic reconnects.
+    // In production (Vercel), VITE_SIGNALING_URL must point to a
+    // separately hosted Node server (e.g. Railway, Render, Fly.io)
+    // because Vercel is serverless and cannot run Socket.io.
+    // In local dev, leave VITE_SIGNALING_URL unset — it connects to the same origin.
+    const signalingUrl = import.meta.env.VITE_SIGNALING_URL as string | undefined;
+    const socket = io(signalingUrl || undefined, {
+      transports: ["websocket", "polling"],
+      reconnectionAttempts: 10,
+      reconnectionDelay: 1000,
+      timeout: 15000
     });
     socketRef.current = socket;
 
