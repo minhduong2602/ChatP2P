@@ -219,23 +219,38 @@ export function useWebRTC(roomId: string | null) {
     return pc;
   }, [sendSignal, setupDataChannel]);
 
+  const createPeerConnectionRef = useRef(createPeerConnection);
+  createPeerConnectionRef.current = createPeerConnection;
+
   useEffect(() => {
     if (!roomId) return;
 
     setStatus("connecting");
 
-    // PartyKit host from env (e.g. "shun-chat-p2p-signaling.username.partykit.dev")
-    // or defaults to local development server "localhost:1999"
-    const partyHost = import.meta.env.VITE_PARTYKIT_HOST || "localhost:1999";
+    // Clean up host string in case user passed full URL with https://
+    const rawHost = import.meta.env.VITE_PARTYKIT_HOST || "localhost:1999";
+    const partyHost = rawHost.replace(/^https?:\/\//, "").replace(/^wss?:\/\//, "").replace(/\/.*$/, "");
+
+    console.log(`[Signaling:PartyKit] Connecting to host "${partyHost}" for room "${roomId}"`);
 
     const socket = new PartySocket({
       host: partyHost,
       room: roomId,
+      connectionTimeout: 15000, // 15 seconds to prevent premature timeout on slower networks
+      maxRetries: 10,
     });
     socketRef.current = socket;
 
     socket.addEventListener("open", () => {
-      console.log(`[Signaling:PartyKit] Connected to room "${roomId}" on ${partyHost}`);
+      console.log(`[Signaling:PartyKit] Connected successfully to room "${roomId}" on ${partyHost}`);
+    });
+
+    socket.addEventListener("error", (err) => {
+      console.warn(`[Signaling:PartyKit] Socket error on room "${roomId}":`, err);
+    });
+
+    socket.addEventListener("close", (event) => {
+      console.log(`[Signaling:PartyKit] Socket closed (code: ${event.code}, reason: ${event.reason || "none"})`);
     });
 
     socket.addEventListener("message", async (event) => {
@@ -252,13 +267,13 @@ export function useWebRTC(roomId: string | null) {
               isPoliteRef.current = true;
               setStatus("negotiating");
               console.log("[WebRTC] Role: POLITE - waiting for offer");
-              createPeerConnection();
+              createPeerConnectionRef.current();
             } else {
               // Impolite peer (early joiner): initiates offer when peer joins
               isPoliteRef.current = false;
               setStatus("waiting");
               console.log("[WebRTC] Role: IMPOLITE - waiting for peer");
-              createPeerConnection();
+              createPeerConnectionRef.current();
             }
             break;
           }
@@ -374,7 +389,7 @@ export function useWebRTC(roomId: string | null) {
             ignoreOfferRef.current = false;
             isPoliteRef.current = false;
             dataChannelRef.current = null;
-            createPeerConnection();
+            createPeerConnectionRef.current();
             break;
           }
         }
@@ -392,7 +407,7 @@ export function useWebRTC(roomId: string | null) {
       dataChannelRef.current = null;
       socketRef.current = null;
     };
-  }, [roomId, createPeerConnection, setupDataChannel, sendSignal]);
+  }, [roomId]);
 
   const retryConnection = useCallback(() => {
     if (!roomId) return;
