@@ -1,6 +1,6 @@
 import React, { useEffect, useState, useRef } from "react";
 import { v4 as uuidv4 } from "uuid";
-import { Link, MessageSquare, Send, Paperclip, FileText, Download, Check, RefreshCw, ShieldCheck, Users } from "lucide-react";
+import { Link, MessageSquare, Send, Paperclip, FileText, Download, Check, Copy, RefreshCw, ShieldCheck, Users } from "lucide-react";
 import { QRCodeSVG } from "qrcode.react";
 import { useWebRTC, type Message } from "./lib/useWebRTC";
 import { cn } from "./lib/utils";
@@ -25,7 +25,7 @@ export default function App() {
 
   if (!roomId) {
     return (
-      <div className="min-h-screen bg-[#f8fafc] text-[#1e293b] font-sans flex items-center justify-center p-4">
+      <div className="h-[100dvh] max-h-[100dvh] w-screen bg-[#f8fafc] text-[#1e293b] font-sans flex items-center justify-center p-4 overflow-hidden">
         <div className="max-w-md w-full bg-white rounded-2xl shadow-sm border border-slate-200 p-8 text-center space-y-6">
           <div className="w-16 h-16 bg-indigo-100 text-indigo-700 rounded-2xl flex items-center justify-center mx-auto mb-4 font-bold">
             <MessageSquare size={32} />
@@ -91,8 +91,8 @@ function ChatRoom({ roomId }: { roomId: string }) {
   const currentUrl = typeof window !== "undefined" ? window.location.href : "";
 
   return (
-    <div className="min-h-screen bg-[#f8fafc] text-[#1e293b] font-sans flex flex-col md:p-6 p-0">
-      <div className="flex-1 w-full max-w-4xl mx-auto bg-white md:rounded-2xl shadow-sm border border-slate-200 flex flex-col overflow-hidden">
+    <div className="h-[100dvh] max-h-[100dvh] w-screen bg-[#f8fafc] text-[#1e293b] font-sans flex flex-col md:p-6 p-0 overflow-hidden">
+      <div className="flex-1 w-full max-w-4xl mx-auto bg-white md:rounded-2xl shadow-sm border border-slate-200 flex flex-col min-h-0 overflow-hidden">
         
         {/* Header */}
         <header className="h-16 border-b border-slate-200 flex items-center justify-between px-4 sm:px-6 shadow-sm z-10 shrink-0 bg-white">
@@ -151,7 +151,7 @@ function ChatRoom({ roomId }: { roomId: string }) {
         </header>
 
         {/* Chat Area */}
-        <div className="flex-1 overflow-y-auto p-4 sm:p-6 bg-slate-50/50" ref={scrollRef}>
+        <div className="flex-1 overflow-y-auto min-h-0 p-4 sm:p-6 bg-slate-50/50" ref={scrollRef}>
           {status !== "connected" && messages.length === 0 && (
             <div className="h-full flex flex-col items-center justify-center text-center max-w-sm mx-auto space-y-5 my-auto py-8">
               <div className="bg-white p-5 rounded-2xl shadow-sm border border-slate-200 flex flex-col items-center">
@@ -254,6 +254,14 @@ function ChatRoom({ roomId }: { roomId: string }) {
 
 function MessageBubble({ msg }: { msg: Message; key?: string }) {
   const isMe = msg.sender === "me";
+  const [copied, setCopied] = useState(false);
+
+  const handleCopy = () => {
+    if (!msg.content) return;
+    navigator.clipboard.writeText(msg.content);
+    setCopied(true);
+    setTimeout(() => setCopied(false), 2000);
+  };
 
   return (
     <div className={cn("flex w-full items-end gap-2 sm:gap-3", isMe ? "justify-end" : "justify-start")}>
@@ -268,13 +276,33 @@ function MessageBubble({ msg }: { msg: Message; key?: string }) {
         isMe ? "items-end" : "items-start"
       )}>
         <div className={cn(
-          "p-3.5 sm:p-4 rounded-2xl",
+          "p-3.5 sm:p-4 rounded-2xl relative group",
           isMe 
             ? "bg-indigo-600 text-white rounded-br-none shadow-md" 
             : "bg-white border border-slate-100 text-slate-700 rounded-bl-none shadow-sm"
         )}>
           {msg.type === "text" ? (
-            <p className="text-sm whitespace-pre-wrap break-words">{msg.content}</p>
+            <div className="flex items-start gap-2">
+              <p className="text-sm whitespace-pre-wrap break-words flex-1">{msg.content}</p>
+              <button
+                onClick={handleCopy}
+                title="Copy text message"
+                aria-label="Copy text message"
+                className={cn(
+                  "p-1 rounded-md transition-all shrink-0 cursor-pointer",
+                  isMe
+                    ? "text-indigo-200 hover:text-white hover:bg-indigo-500/50"
+                    : "text-slate-400 hover:text-slate-700 hover:bg-slate-100",
+                  copied ? "opacity-100" : "opacity-0 group-hover:opacity-100 max-sm:opacity-60"
+                )}
+              >
+                {copied ? (
+                  <Check size={13} className={isMe ? "text-indigo-100" : "text-emerald-500"} />
+                ) : (
+                  <Copy size={13} />
+                )}
+              </button>
+            </div>
           ) : (
             <div className={cn(
               "flex items-center gap-3 sm:gap-4 p-3 rounded-xl border",
@@ -309,9 +337,17 @@ function MessageBubble({ msg }: { msg: Message; key?: string }) {
             </div>
           )}
         </div>
-        <span className="text-[10px] text-slate-400 mt-1.5 block px-1">
-          {format(msg.timestamp, "HH:mm a")}
-        </span>
+
+        <div className="flex items-center gap-2 mt-1 px-1">
+          <span className="text-[10px] text-slate-400">
+            {format(msg.timestamp, "HH:mm a")}
+          </span>
+          {msg.type === "text" && copied && (
+            <span className="text-[10px] text-emerald-600 font-medium flex items-center gap-0.5">
+              <Check size={10} /> Copied!
+            </span>
+          )}
+        </div>
       </div>
     </div>
   );
