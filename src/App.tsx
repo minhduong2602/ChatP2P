@@ -8,6 +8,8 @@ import { format } from "date-fns";
 
 export default function App() {
   const [roomId, setRoomId] = useState<string | null>(null);
+  const [joinInput, setJoinInput] = useState("");
+  const [joinError, setJoinError] = useState("");
 
   useEffect(() => {
     const params = new URLSearchParams(window.location.search);
@@ -23,26 +25,83 @@ export default function App() {
     setRoomId(newRoom);
   };
 
+  const handleJoinRoom = () => {
+    const room = joinInput.trim().toLowerCase().replace(/[^a-z0-9-]/g, "");
+    if (!room) {
+      setJoinError("Please enter a valid Room ID.");
+      return;
+    }
+    window.history.pushState({}, "", `?room=${room}`);
+    setRoomId(room);
+  };
+
+  const handleJoinKeyDown = (e: React.KeyboardEvent<HTMLInputElement>) => {
+    if (e.key === "Enter") handleJoinRoom();
+  };
+
   if (!roomId) {
     return (
       <div className="h-[100dvh] max-h-[100dvh] w-screen bg-[#f8fafc] text-[#1e293b] font-sans flex items-center justify-center p-4 overflow-hidden">
-        <div className="max-w-md w-full bg-white rounded-2xl shadow-sm border border-slate-200 p-8 text-center space-y-6">
-          <div className="w-16 h-16 bg-indigo-100 text-indigo-700 rounded-2xl flex items-center justify-center mx-auto mb-4 font-bold">
-            <MessageSquare size={32} />
-          </div>
-          <div className="space-y-2">
+        <div className="max-w-md w-full bg-white rounded-2xl shadow-sm border border-slate-200 p-8 space-y-6">
+          {/* Header */}
+          <div className="text-center space-y-3">
+            <div className="w-16 h-16 bg-indigo-100 text-indigo-700 rounded-2xl flex items-center justify-center mx-auto font-bold">
+              <MessageSquare size={32} />
+            </div>
             <h1 className="text-2xl font-bold tracking-tight text-indigo-600">Secure P2P Chat</h1>
             <p className="text-slate-500 text-sm">
-              End-to-end encrypted direct connection via WebRTC. Direct device-to-device with zero server message logging.
+              End-to-end encrypted direct connection via WebRTC. Zero server message logging.
             </p>
           </div>
+
+          {/* Create new room */}
           <button
             id="start-chat-btn"
             onClick={handleCreateRoom}
-            className="w-full bg-indigo-600 hover:bg-indigo-700 text-white rounded-xl py-3.5 px-4 font-medium transition-colors shadow-lg shadow-indigo-200 cursor-pointer"
+            className="w-full bg-indigo-600 hover:bg-indigo-700 text-white rounded-xl py-3.5 px-4 font-semibold transition-colors shadow-lg shadow-indigo-200 cursor-pointer"
           >
-            Start New Chat
+            + Start New Chat
           </button>
+
+          {/* Divider */}
+          <div className="flex items-center gap-3">
+            <div className="flex-1 h-px bg-slate-200" />
+            <span className="text-xs text-slate-400 font-medium">or join existing room</span>
+            <div className="flex-1 h-px bg-slate-200" />
+          </div>
+
+          {/* Join existing room */}
+          <div className="space-y-2">
+            <div className="flex gap-2">
+              <input
+                id="join-room-input"
+                type="text"
+                value={joinInput}
+                onChange={(e) => {
+                  setJoinInput(e.target.value);
+                  setJoinError("");
+                }}
+                onKeyDown={handleJoinKeyDown}
+                placeholder="Enter Room ID (e.g. 4cb52e14)"
+                className="flex-1 border border-slate-200 rounded-xl px-4 py-3 text-sm text-slate-700 placeholder:text-slate-400 focus:outline-none focus:ring-2 focus:ring-indigo-400 focus:border-transparent transition-all"
+              />
+              <button
+                id="join-room-btn"
+                onClick={handleJoinRoom}
+                className="px-4 py-3 bg-slate-800 hover:bg-slate-700 text-white rounded-xl text-sm font-semibold transition-colors cursor-pointer shrink-0"
+              >
+                Join
+              </button>
+            </div>
+            {joinError && (
+              <p className="text-xs text-rose-500 px-1">{joinError}</p>
+            )}
+          </div>
+
+          {/* Footer note */}
+          <p className="text-center text-[11px] text-slate-400">
+            Share your Room ID with a friend so they can join directly.
+          </p>
         </div>
       </div>
     );
