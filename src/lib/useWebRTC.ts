@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState, useCallback } from "react";
+﻿import { useEffect, useRef, useState, useCallback } from "react";
 import PartySocket from "partysocket";
 import { v4 as uuidv4 } from "uuid";
 
@@ -12,32 +12,34 @@ export type Message = {
   timestamp: number;
 };
 
-export type ConnectionStatus = "connecting" | "waiting" | "negotiating" | "connected" | "disconnected";
+export type ConnectionStatus =
+  | "connecting"
+  | "waiting"
+  | "negotiating"
+  | "connected"
+  | "disconnected";
 
+// Lean ICE config: 1 STUN (Google) + 1 STUN (Cloudflare) + TURN relay cluster.
+// Pre-gathering 4 candidates reduces time-to-first-candidate significantly.
 const ICE_SERVERS: RTCConfiguration = {
   iceServers: [
     { urls: "stun:stun.l.google.com:19302" },
-    { urls: "stun:stun1.l.google.com:19302" },
-    { urls: "stun:stun2.l.google.com:19302" },
     { urls: "stun:stun.cloudflare.com:3478" },
-    // Free public TURN servers from OpenRelay (Metered) to bypass 4G/Symmetric NAT firewalls
     {
-      urls: "turn:openrelay.metered.ca:80",
-      username: "openrelay",
-      credential: "openrelay",
-    },
-    {
-      urls: "turn:openrelay.metered.ca:443",
-      username: "openrelay",
-      credential: "openrelay",
-    },
-    {
-      urls: "turn:openrelay.metered.ca:443?transport=tcp",
+      urls: [
+        "turn:openrelay.metered.ca:80",
+        "turn:openrelay.metered.ca:443",
+        "turn:openrelay.metered.ca:443?transport=tcp",
+      ],
       username: "openrelay",
       credential: "openrelay",
     },
   ],
+  iceCandidatePoolSize: 4, // pre-gather before offer — cuts ICE latency
 };
+
+// How long to wait (ms) for peer to signal "ready" before sending offer anyway
+const READY_TIMEOUT_MS = 3000;
 
 export function useWebRTC(roomId: string | null) {
   const [status, setStatus] = useState<ConnectionStatus>("connecting");
@@ -48,8 +50,9 @@ export function useWebRTC(roomId: string | null) {
   const peerRef = useRef<RTCPeerConnection | null>(null);
   const dataChannelRef = useRef<RTCDataChannel | null>(null);
   const iceCandidateQueueRef = useRef<RTCIceCandidateInit[]>([]);
+  const readyTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
-  // Perfect Negotiation refs (RFC 8829 §4.1.1)
+  // Perfect Negotiation (RFC 8829 §4.1.1)
   const isPoliteRef = useRef(false);
   const makingOfferRef = useRef(false);
   const ignoreOfferRef = useRef(false);
@@ -57,36 +60,48 @@ export function useWebRTC(roomId: string | null) {
   // File receiving state
   const receiveBufferRef = useRef<ArrayBuffer[]>([]);
   const receivedSizeRef = useRef(0);
-  const incomingFileInfoRef = useRef<{ id?: string; name: string; size: number; type: string } | null>(null);
+  const incomingFileInfoRef = useRef<{
+    id?: string;
+    name: string;
+    size: number;
+    type: string;
+  } | null>(null);
 
   const addMessage = useCallback((msg: Message) => {
     setMessages((prev) => [...prev, msg]);
   }, []);
 
-  const sendSignal = useCallback((data: Record<string, any>) => {
-    if (socketRef.current && socketRef.current.readyState === WebSocket.OPEN) {
-      socketRef.current.send(JSON.stringify(data));
+  // Send a JSON signaling message over the PartySocket
+  const sendSignal = useCallback((data: Record<string, unknown>) => {
+    const sock = socketRef.current;
+    if (sock && sock.readyState === WebSocket.OPEN) {
+      sock.send(JSON.stringify(data));
     }
   }, []);
 
+  const sendSignalRef = useRef(sendSignal);
+  sendSignalRef.current = sendSignal;
+
+  // ----------------------------------------------------------------
+  // setupDataChannel
+  // ----------------------------------------------------------------
   const setupDataChannel = useCallback(
     (channel: RTCDataChannel) => {
       channel.binaryType = "arraybuffer";
-      channel.bufferedAmountLowThreshold = 65536; // 64 KB
+      channel.bufferedAmountLowThreshold = 65536;
 
       channel.onopen = () => {
-        console.log("[WebRTC] Data channel opened");
+        console.log("[WebRTC] DataChannel opened ✓");
         setStatus("connected");
       };
 
       channel.onclose = () => {
-        console.log("[WebRTC] Data channel closed");
+        console.log("[WebRTC] DataChannel closed");
         setStatus((s) => (s === "connected" ? "disconnected" : s));
       };
 
-      channel.onerror = (err) => {
-        console.error("[WebRTC] Data channel error", err);
-      };
+      channel.onerror = (err) =>
+        console.error("[WebRTC] DataChannel error", err);
 
       channel.onmessage = (event) => {
         if (typeof event.data === "string") {
@@ -106,7 +121,7 @@ export function useWebRTC(roomId: string | null) {
               });
             }
           } catch (e) {
-            console.error("[WebRTC] Failed to parse string message", e);
+            console.error("[WebRTC] Failed to parse message", e);
           }
         } else if (event.data instanceof ArrayBuffer) {
           receiveBufferRef.current.push(event.data);
@@ -119,13 +134,12 @@ export function useWebRTC(roomId: string | null) {
             const blob = new Blob(receiveBufferRef.current, {
               type: incomingFileInfoRef.current.type,
             });
-            const url = URL.createObjectURL(blob);
             addMessage({
               id: incomingFileInfoRef.current.id || uuidv4(),
               sender: "peer",
               type: "file",
               content: incomingFileInfoRef.current.name,
-              fileUrl: url,
+              fileUrl: URL.createObjectURL(blob),
               fileType: incomingFileInfoRef.current.type,
               timestamp: Date.now(),
             });
@@ -141,6 +155,32 @@ export function useWebRTC(roomId: string | null) {
     [addMessage]
   );
 
+  const setupDataChannelRef = useRef(setupDataChannel);
+  setupDataChannelRef.current = setupDataChannel;
+
+  // ----------------------------------------------------------------
+  // initiateOffer — called only after both peers are ready
+  // ----------------------------------------------------------------
+  const initiateOffer = useCallback(
+    (pc: RTCPeerConnection) => {
+      if (dataChannelRef.current && dataChannelRef.current.readyState !== "closed") {
+        console.log("[WebRTC] DataChannel already exists, skipping re-initiation");
+        return;
+      }
+      console.log("[WebRTC] Creating DataChannel and triggering offer...");
+      const dc = pc.createDataChannel("chat", { ordered: true });
+      setupDataChannelRef.current(dc);
+      // onnegotiationneeded fires automatically -> sends offer
+    },
+    []
+  );
+
+  const initiateOfferRef = useRef(initiateOffer);
+  initiateOfferRef.current = initiateOffer;
+
+  // ----------------------------------------------------------------
+  // createPeerConnection — builds fresh RTCPeerConnection
+  // ----------------------------------------------------------------
   const createPeerConnection = useCallback((): RTCPeerConnection => {
     if (peerRef.current) {
       peerRef.current.onicecandidate = null;
@@ -158,58 +198,61 @@ export function useWebRTC(roomId: string | null) {
 
     const pc = new RTCPeerConnection(ICE_SERVERS);
 
-    pc.onicecandidate = (event) => {
-      if (event.candidate) {
-        sendSignal({
+    // Trickle ICE — send each candidate as soon as it is found (no batching)
+    pc.onicecandidate = ({ candidate }) => {
+      if (candidate) {
+        sendSignalRef.current({
           type: "candidate",
-          candidate: event.candidate.toJSON(),
+          candidate: candidate.toJSON(),
         });
       }
     };
 
     pc.oniceconnectionstatechange = () => {
-      console.log("[WebRTC] ICE state:", pc.iceConnectionState);
-      if (pc.iceConnectionState === "failed") {
-        console.warn("[WebRTC] ICE failed - restarting ICE");
+      const s = pc.iceConnectionState;
+      console.log("[WebRTC] ICE:", s);
+      if (s === "failed") {
+        // Attempt seamless ICE restart before giving up
         if (typeof pc.restartIce === "function") {
+          console.warn("[WebRTC] ICE failed — restarting ICE...");
           pc.restartIce();
         } else {
           setStatus("disconnected");
         }
-      } else if (pc.iceConnectionState === "disconnected") {
-        setStatus("disconnected");
       }
+      // Do NOT set disconnected on "disconnected" ICE state alone —
+      // it is transient and usually recovers automatically.
     };
 
     pc.onconnectionstatechange = () => {
-      console.log("[WebRTC] Connection state:", pc.connectionState);
-      if (pc.connectionState === "connected") {
+      const s = pc.connectionState;
+      console.log("[WebRTC] Connection:", s);
+      if (s === "connected") {
         setStatus("connected");
-      } else if (pc.connectionState === "failed" || pc.connectionState === "closed") {
+      } else if (s === "failed") {
+        // Only hard-fail on connection-level failure, not ICE-level
         setStatus("disconnected");
       }
+      // "disconnected" state is transient - do not hard-fail
     };
 
     pc.ondatachannel = (event) => {
-      console.log("[WebRTC] Received remote data channel");
-      setupDataChannel(event.channel);
+      console.log("[WebRTC] Received remote DataChannel");
+      setupDataChannelRef.current(event.channel);
     };
 
-    // Perfect Negotiation offer creation
+    // Perfect Negotiation: onnegotiationneeded fires when createDataChannel is called
     pc.onnegotiationneeded = async () => {
       try {
         makingOfferRef.current = true;
-        console.log("[WebRTC] Negotiation needed - creating offer...");
         setStatus("negotiating");
+        console.log("[WebRTC] onnegotiationneeded — creating offer...");
         await pc.setLocalDescription();
-        sendSignal({
-          type: "offer",
-          offer: pc.localDescription,
-        });
-        console.log("[WebRTC] Offer sent to room via PartyKit");
+        sendSignalRef.current({ type: "offer", offer: pc.localDescription });
+        console.log("[WebRTC] Offer sent via PartyKit ✓");
       } catch (err) {
         console.error("[WebRTC] onnegotiationneeded error:", err);
-        setStatus("disconnected");
+        // Don't immediately set disconnected — error could be transient
       } finally {
         makingOfferRef.current = false;
       }
@@ -217,188 +260,227 @@ export function useWebRTC(roomId: string | null) {
 
     peerRef.current = pc;
     return pc;
-  }, [sendSignal, setupDataChannel]);
+  }, []);
 
   const createPeerConnectionRef = useRef(createPeerConnection);
   createPeerConnectionRef.current = createPeerConnection;
 
+  // ----------------------------------------------------------------
+  // useEffect — socket lifecycle (only depends on roomId)
+  // ----------------------------------------------------------------
   useEffect(() => {
     if (!roomId) return;
 
     setStatus("connecting");
 
-    // Clean up host string in case user passed full URL with https://
-    const rawHost = import.meta.env.VITE_PARTYKIT_HOST || "localhost:1999";
-    const partyHost = rawHost.replace(/^https?:\/\//, "").replace(/^wss?:\/\//, "").replace(/\/.*$/, "");
+    const rawHost = (import.meta.env.VITE_PARTYKIT_HOST as string) || "localhost:1999";
+    const partyHost = rawHost
+      .replace(/^https?:\/\//, "")
+      .replace(/^wss?:\/\//, "")
+      .replace(/\/.*$/, "");
 
-    console.log(`[Signaling:PartyKit] Connecting to host "${partyHost}" for room "${roomId}"`);
+    console.log(`[Signaling] Connecting to "${partyHost}" room "${roomId}"`);
 
     const socket = new PartySocket({
       host: partyHost,
       room: roomId,
-      connectionTimeout: 15000, // 15 seconds to prevent premature timeout on slower networks
+      connectionTimeout: 15000,
       maxRetries: 10,
     });
     socketRef.current = socket;
 
-    socket.addEventListener("open", () => {
-      console.log(`[Signaling:PartyKit] Connected successfully to room "${roomId}" on ${partyHost}`);
-    });
+    socket.addEventListener("open", () =>
+      console.log(`[Signaling] Socket OPEN for room "${roomId}"`)
+    );
+    socket.addEventListener("error", (e) =>
+      console.warn("[Signaling] Socket error:", e)
+    );
+    socket.addEventListener("close", (e: CloseEvent) =>
+      console.log(`[Signaling] Socket CLOSED code=${e.code}`)
+    );
 
-    socket.addEventListener("error", (err) => {
-      console.warn(`[Signaling:PartyKit] Socket error on room "${roomId}":`, err);
-    });
-
-    socket.addEventListener("close", (event) => {
-      console.log(`[Signaling:PartyKit] Socket closed (code: ${event.code}, reason: ${event.reason || "none"})`);
-    });
-
-    socket.addEventListener("message", async (event) => {
+    socket.addEventListener("message", async (event: MessageEvent) => {
+      let data: Record<string, unknown>;
       try {
-        const data = JSON.parse(event.data);
+        data = JSON.parse(event.data as string);
+      } catch {
+        return;
+      }
 
-        switch (data.type) {
-          case "room-joined": {
-            console.log("[Signaling] room-joined:", data);
-            setPeerCount(data.numClients);
+      switch (data.type) {
+        // ---- room-joined: we just connected to the signaling room ----
+        case "room-joined": {
+          const numClients = data.numClients as number;
+          console.log(`[Signaling] room-joined (peers in room: ${numClients})`);
+          setPeerCount(numClients);
 
-            if (data.numClients > 1) {
-              // Polite peer (late joiner): rolls back on glare
-              isPoliteRef.current = true;
-              setStatus("negotiating");
-              console.log("[WebRTC] Role: POLITE - waiting for offer");
-              createPeerConnectionRef.current();
-            } else {
-              // Impolite peer (early joiner): initiates offer when peer joins
-              isPoliteRef.current = false;
-              setStatus("waiting");
-              console.log("[WebRTC] Role: IMPOLITE - waiting for peer");
-              createPeerConnectionRef.current();
-            }
-            break;
-          }
-
-          case "peer-joined": {
-            console.log("[Signaling] Peer joined. Initiating offer as impolite peer.");
-            setPeerCount(2);
-
-            const pc = peerRef.current;
-            if (!pc) {
-              console.warn("[WebRTC] peer-joined but no RTCPeerConnection available");
-              return;
-            }
-
-            if (!dataChannelRef.current || dataChannelRef.current.readyState === "closed") {
-              const dc = pc.createDataChannel("chat", { ordered: true });
-              setupDataChannel(dc);
-              // onnegotiationneeded triggers offer automatically
-            }
-            break;
-          }
-
-          case "offer": {
-            const pc = peerRef.current;
-            if (!pc) return;
-
-            const offerCollision = makingOfferRef.current || pc.signalingState !== "stable";
-            ignoreOfferRef.current = !isPoliteRef.current && offerCollision;
-
-            if (ignoreOfferRef.current) {
-              console.log("[WebRTC] Glare - ignoring offer (impolite peer)");
-              return;
-            }
-
-            console.log("[WebRTC] Handling offer...");
+          if (numClients > 1) {
+            // We are the POLITE peer (late joiner).
+            // Create PC immediately, then tell the offerer we're ready.
+            isPoliteRef.current = true;
             setStatus("negotiating");
-
-            try {
-              if (offerCollision) {
-                console.log("[WebRTC] Glare - rolling back local offer (polite peer)");
-                await pc.setLocalDescription({ type: "rollback" });
-              }
-
-              await pc.setRemoteDescription(new RTCSessionDescription(data.offer));
-
-              const queued = iceCandidateQueueRef.current.splice(0);
-              for (const cand of queued) {
-                await pc
-                  .addIceCandidate(new RTCIceCandidate(cand))
-                  .catch((e) => console.warn("[WebRTC] Queued ICE flush error:", e));
-              }
-
-              await pc.setLocalDescription();
-              sendSignal({
-                type: "answer",
-                answer: pc.localDescription,
-              });
-              console.log("[WebRTC] Answer sent via PartyKit");
-            } catch (err) {
-              console.error("[WebRTC] Error handling offer:", err);
-              setStatus("disconnected");
-            }
-            break;
-          }
-
-          case "answer": {
-            const pc = peerRef.current;
-            if (!pc || ignoreOfferRef.current) return;
-
-            console.log("[WebRTC] Handling answer...");
-            try {
-              if (pc.signalingState !== "have-local-offer") {
-                console.warn("[WebRTC] Unexpected state for answer:", pc.signalingState);
-                return;
-              }
-
-              await pc.setRemoteDescription(new RTCSessionDescription(data.answer));
-
-              const queued = iceCandidateQueueRef.current.splice(0);
-              for (const cand of queued) {
-                await pc
-                  .addIceCandidate(new RTCIceCandidate(cand))
-                  .catch((e) => console.warn("[WebRTC] Queued ICE flush error:", e));
-              }
-              console.log("[WebRTC] Remote description set from answer");
-            } catch (err) {
-              console.error("[WebRTC] Error setting remote description from answer:", err);
-            }
-            break;
-          }
-
-          case "candidate": {
-            if (!data.candidate || ignoreOfferRef.current) return;
-            const pc = peerRef.current;
-            if (!pc) return;
-
-            if (pc.remoteDescription?.type) {
-              await pc
-                .addIceCandidate(new RTCIceCandidate(data.candidate))
-                .catch((e) => console.warn("[WebRTC] ICE candidate error:", e));
-            } else {
-              iceCandidateQueueRef.current.push(data.candidate);
-            }
-            break;
-          }
-
-          case "peer-disconnected": {
-            console.log("[Signaling] Peer disconnected");
-            setPeerCount(1);
-            setStatus("waiting");
-            iceCandidateQueueRef.current = [];
-            makingOfferRef.current = false;
-            ignoreOfferRef.current = false;
-            isPoliteRef.current = false;
-            dataChannelRef.current = null;
+            console.log("[WebRTC] Role: POLITE — sending ready signal");
             createPeerConnectionRef.current();
-            break;
+            // Signal the other peer that we have our PC set up
+            socket.send(JSON.stringify({ type: "ready" }));
+          } else {
+            // We are the IMPOLITE peer (early joiner / offerer).
+            isPoliteRef.current = false;
+            setStatus("waiting");
+            console.log("[WebRTC] Role: IMPOLITE — waiting for peer + ready signal");
+            createPeerConnectionRef.current();
           }
+          break;
         }
-      } catch (err) {
-        console.error("[PartyKit] Failed to parse message:", err);
+
+        // ---- peer-joined: a 2nd peer has connected to our room ----
+        case "peer-joined": {
+          console.log("[Signaling] peer-joined — waiting for their ready signal");
+          setPeerCount(2);
+          // Don't initiate yet; wait for "ready" from the peer.
+          // Safety fallback: if ready never arrives within READY_TIMEOUT_MS, initiate anyway.
+          if (readyTimerRef.current) clearTimeout(readyTimerRef.current);
+          readyTimerRef.current = setTimeout(() => {
+            const pc = peerRef.current;
+            if (pc && (!dataChannelRef.current || dataChannelRef.current.readyState === "closed")) {
+              console.warn("[WebRTC] ready signal timeout — initiating offer anyway");
+              initiateOfferRef.current(pc);
+            }
+          }, READY_TIMEOUT_MS);
+          break;
+        }
+
+        // ---- ready: peer-2 has their PC set up, safe to send offer ----
+        case "ready": {
+          console.log("[Signaling] Peer sent ready ✓ — initiating offer");
+          if (readyTimerRef.current) {
+            clearTimeout(readyTimerRef.current);
+            readyTimerRef.current = null;
+          }
+          const pc = peerRef.current;
+          if (pc) {
+            initiateOfferRef.current(pc);
+          }
+          break;
+        }
+
+        // ---- room-full ----
+        case "room-full": {
+          console.warn("[Signaling] Room is full!");
+          setStatus("disconnected");
+          break;
+        }
+
+        // ---- offer ----
+        case "offer": {
+          const pc = peerRef.current;
+          if (!pc) return;
+
+          const offerCollision =
+            makingOfferRef.current || pc.signalingState !== "stable";
+          ignoreOfferRef.current = !isPoliteRef.current && offerCollision;
+
+          if (ignoreOfferRef.current) {
+            console.log("[WebRTC] Glare — ignoring offer (impolite)");
+            return;
+          }
+
+          setStatus("negotiating");
+          try {
+            if (offerCollision) {
+              console.log("[WebRTC] Glare — rolling back (polite)");
+              await pc.setLocalDescription({ type: "rollback" });
+            }
+            await pc.setRemoteDescription(
+              new RTCSessionDescription(data.offer as RTCSessionDescriptionInit)
+            );
+            // Flush queued ICE candidates
+            const queued = iceCandidateQueueRef.current.splice(0);
+            for (const c of queued) {
+              await pc.addIceCandidate(new RTCIceCandidate(c)).catch((e) =>
+                console.warn("[WebRTC] Queued ICE flush:", e)
+              );
+            }
+            await pc.setLocalDescription();
+            socket.send(
+              JSON.stringify({ type: "answer", answer: pc.localDescription })
+            );
+            console.log("[WebRTC] Answer sent ✓");
+          } catch (err) {
+            console.error("[WebRTC] Error handling offer:", err);
+            // Don't set disconnected — let ICE recovery try
+          }
+          break;
+        }
+
+        // ---- answer ----
+        case "answer": {
+          const pc = peerRef.current;
+          if (!pc || ignoreOfferRef.current) return;
+
+          if (pc.signalingState !== "have-local-offer") {
+            console.warn("[WebRTC] Answer in unexpected state:", pc.signalingState);
+            return;
+          }
+          try {
+            await pc.setRemoteDescription(
+              new RTCSessionDescription(data.answer as RTCSessionDescriptionInit)
+            );
+            // Flush queued ICE candidates
+            const queued = iceCandidateQueueRef.current.splice(0);
+            for (const c of queued) {
+              await pc.addIceCandidate(new RTCIceCandidate(c)).catch((e) =>
+                console.warn("[WebRTC] Queued ICE flush:", e)
+              );
+            }
+            console.log("[WebRTC] Answer applied ✓");
+          } catch (err) {
+            console.error("[WebRTC] Error applying answer:", err);
+          }
+          break;
+        }
+
+        // ---- candidate (trickle ICE) ----
+        case "candidate": {
+          if (!data.candidate || ignoreOfferRef.current) return;
+          const pc = peerRef.current;
+          if (!pc) return;
+
+          const cand = data.candidate as RTCIceCandidateInit;
+          if (pc.remoteDescription?.type) {
+            await pc
+              .addIceCandidate(new RTCIceCandidate(cand))
+              .catch((e) => console.warn("[WebRTC] ICE candidate error:", e));
+          } else {
+            // Queue until remote description is set
+            iceCandidateQueueRef.current.push(cand);
+          }
+          break;
+        }
+
+        // ---- peer-disconnected ----
+        case "peer-disconnected": {
+          console.log("[Signaling] Peer disconnected");
+          if (readyTimerRef.current) {
+            clearTimeout(readyTimerRef.current);
+            readyTimerRef.current = null;
+          }
+          setPeerCount(1);
+          setStatus("waiting");
+          iceCandidateQueueRef.current = [];
+          makingOfferRef.current = false;
+          ignoreOfferRef.current = false;
+          isPoliteRef.current = false;
+          dataChannelRef.current = null;
+          // Rebuild PC so we're ready for the next peer
+          createPeerConnectionRef.current();
+          break;
+        }
       }
     });
 
     return () => {
+      if (readyTimerRef.current) clearTimeout(readyTimerRef.current);
       socket.close();
       if (peerRef.current) {
         peerRef.current.close();
@@ -409,22 +491,28 @@ export function useWebRTC(roomId: string | null) {
     };
   }, [roomId]);
 
+  // ----------------------------------------------------------------
+  // retryConnection — manual re-kick
+  // ----------------------------------------------------------------
   const retryConnection = useCallback(() => {
-    if (!roomId) return;
-    console.log("[WebRTC] Manual retry...");
-
+    if (readyTimerRef.current) {
+      clearTimeout(readyTimerRef.current);
+      readyTimerRef.current = null;
+    }
     iceCandidateQueueRef.current = [];
     makingOfferRef.current = false;
     ignoreOfferRef.current = false;
     isPoliteRef.current = false;
     dataChannelRef.current = null;
 
-    const pc = createPeerConnection();
-    const dc = pc.createDataChannel("chat", { ordered: true });
-    setupDataChannel(dc);
+    const pc = createPeerConnectionRef.current();
+    initiateOfferRef.current(pc);
     setStatus("negotiating");
-  }, [roomId, createPeerConnection, setupDataChannel]);
+  }, []);
 
+  // ----------------------------------------------------------------
+  // sendMessage
+  // ----------------------------------------------------------------
   const sendMessage = useCallback(
     (text: string) => {
       if (dataChannelRef.current?.readyState === "open") {
@@ -441,6 +529,9 @@ export function useWebRTC(roomId: string | null) {
     [addMessage]
   );
 
+  // ----------------------------------------------------------------
+  // sendFile
+  // ----------------------------------------------------------------
   const sendFile = useCallback(
     async (file: File) => {
       if (!dataChannelRef.current || dataChannelRef.current.readyState !== "open") return;
@@ -471,7 +562,6 @@ export function useWebRTC(roomId: string | null) {
           channel.send(chunk);
           offset += chunk.byteLength;
         }
-
         addMessage({
           id: fileId,
           sender: "me",
