@@ -1,4 +1,4 @@
-﻿import { useEffect, useRef, useState, useCallback } from "react";
+import { useEffect, useRef, useState, useCallback } from "react";
 import PartySocket from "partysocket";
 import { v4 as uuidv4 } from "uuid";
 
@@ -22,7 +22,7 @@ export type ConnectionStatus =
 // File chunking constants for relay
 const CHUNK_SIZE = 32 * 1024; // 32 KB per chunk as base64 over WebSocket
 
-export function useWebRTC(roomId: string | null) {
+export function useWebRTC(roomId: string | null, password?: string) {
   const [status, setStatus] = useState<ConnectionStatus>("connecting");
   const [peerCount, setPeerCount] = useState<number>(1);
   const [messages, setMessages] = useState<Message[]>([]);
@@ -69,18 +69,21 @@ export function useWebRTC(roomId: string | null) {
       .replace(/^wss?:\/\//, "")
       .replace(/\/.*$/, "");
 
-    console.log(`[Relay] Connecting to "${partyHost}" room "${roomId}"`);
+    if (import.meta.env.DEV) {
+      console.log(`[Relay] Connecting to "${partyHost}" room "${roomId}"`);
+    }
 
     const socket = new PartySocket({
       host: partyHost,
       room: roomId,
+      query: password ? { auth: password } : undefined,
       connectionTimeout: 15000,
       maxRetries: 20,
     });
     socketRef.current = socket;
 
     socket.addEventListener("open", () => {
-      console.log("[Relay] Socket OPEN");
+      if (import.meta.env.DEV) console.log("[Relay] Socket OPEN");
     });
 
     socket.addEventListener("error", (e) => {
@@ -206,7 +209,7 @@ export function useWebRTC(roomId: string | null) {
       socketRef.current = null;
       incomingFileRef.current = null;
     };
-  }, [roomId, addMessage]);
+  }, [roomId, password, addMessage]);
 
   // ── sendMessage ──────────────────────────────────────────────
   const sendMessage = useCallback(

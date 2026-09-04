@@ -1,4 +1,4 @@
-﻿import type * as Party from "partykit/server";
+import type * as Party from "partykit/server";
 
 /**
  * ChatSignalingServer — Pure relay server via PartyKit WebSocket.
@@ -7,6 +7,24 @@
  */
 export default class ChatSignalingServer implements Party.Server {
   constructor(readonly room: Party.Room) {}
+
+  static onBeforeConnect(req: Party.Request, lobby: Party.Lobby) {
+    const expectedPassword =
+      (lobby.env.APP_PASSWORD as string | undefined) ||
+      (lobby.env.VITE_APP_PASSWORD as string | undefined) ||
+      "chat123";
+
+    if (expectedPassword) {
+      const url = new URL(req.url);
+      const auth = url.searchParams.get("auth");
+      if (!auth || auth !== expectedPassword) {
+        console.warn(`[PartyKit] Connection rejected: invalid auth token from ${req.headers.get("x-forwarded-for") || "unknown"}`);
+        return new Response("Unauthorized: Invalid or missing password", { status: 401 });
+      }
+    }
+
+    return req;
+  }
 
   onConnect(conn: Party.Connection) {
     const connections = [...this.room.getConnections()];

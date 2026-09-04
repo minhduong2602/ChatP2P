@@ -1,12 +1,51 @@
 import React, { useEffect, useState, useRef } from "react";
 import { v4 as uuidv4 } from "uuid";
-import { Link, MessageSquare, Send, Paperclip, FileText, Download, Check, Copy, RefreshCw, ShieldCheck, Users } from "lucide-react";
+import {
+  Link,
+  MessageSquare,
+  Send,
+  Paperclip,
+  FileText,
+  Download,
+  Check,
+  Copy,
+  RefreshCw,
+  ShieldCheck,
+  Users,
+  Lock,
+  Unlock,
+  Eye,
+  EyeOff,
+  LogOut,
+} from "lucide-react";
 import { QRCodeSVG } from "qrcode.react";
 import { useWebRTC, type Message } from "./lib/useWebRTC";
 import { cn } from "./lib/utils";
 import { format } from "date-fns";
 
+const EXPECTED_PASSWORD = ((import.meta.env.VITE_APP_PASSWORD as string) || "chat123").trim();
+const STORAGE_KEY = "chatp2p_auth_token";
+
 export default function App() {
+  const [password, setPassword] = useState<string>(() => {
+    const saved = localStorage.getItem(STORAGE_KEY)?.trim();
+    if (saved && saved === EXPECTED_PASSWORD) return saved;
+
+    if (typeof window !== "undefined") {
+      const urlParams = new URLSearchParams(window.location.search);
+      const pwd = urlParams.get("pwd")?.trim();
+      if (pwd && pwd === EXPECTED_PASSWORD) {
+        localStorage.setItem(STORAGE_KEY, pwd);
+        return pwd;
+      }
+    }
+    return "";
+  });
+
+  const [passwordInput, setPasswordInput] = useState("");
+  const [passwordError, setPasswordError] = useState("");
+  const [showPassword, setShowPassword] = useState(false);
+
   const [roomId, setRoomId] = useState<string | null>(null);
   const [joinInput, setJoinInput] = useState("");
   const [joinError, setJoinError] = useState("");
@@ -18,6 +57,30 @@ export default function App() {
       setRoomId(room);
     }
   }, []);
+
+  const handleUnlock = (e?: React.FormEvent) => {
+    if (e) e.preventDefault();
+    if (passwordInput.trim() === EXPECTED_PASSWORD) {
+      localStorage.setItem(STORAGE_KEY, passwordInput.trim());
+      setPassword(passwordInput.trim());
+      setPasswordError("");
+    } else {
+      setPasswordError("Incorrect password. Please try again.");
+    }
+  };
+
+  const handleLock = () => {
+    localStorage.removeItem(STORAGE_KEY);
+    setPassword("");
+    setPasswordInput("");
+    setPasswordError("");
+
+    const url = new URL(window.location.href);
+    if (url.searchParams.has("pwd")) {
+      url.searchParams.delete("pwd");
+      window.history.replaceState({}, "", url.toString());
+    }
+  };
 
   const handleCreateRoom = () => {
     const newRoom = uuidv4().slice(0, 8);
@@ -39,10 +102,88 @@ export default function App() {
     if (e.key === "Enter") handleJoinRoom();
   };
 
+  // ── 1. Password Gate (PartyKit & Chat will NOT load) ────────
+  if (password !== EXPECTED_PASSWORD) {
+    return (
+      <div className="h-[100dvh] max-h-[100dvh] w-screen bg-[#f8fafc] text-[#1e293b] font-sans flex items-center justify-center p-4 overflow-hidden">
+        <div className="max-w-md w-full bg-white rounded-2xl shadow-sm border border-slate-200 p-8 space-y-6">
+          <div className="text-center space-y-3">
+            <div className="w-16 h-16 bg-amber-50 text-amber-600 rounded-2xl flex items-center justify-center mx-auto border border-amber-100">
+              <Lock size={30} />
+            </div>
+            <h1 className="text-2xl font-bold tracking-tight text-slate-800">Password Protected</h1>
+            <p className="text-slate-500 text-sm">
+              Enter your personal access password to unlock ChatP2P and initialize signaling.
+            </p>
+          </div>
+
+          <form onSubmit={handleUnlock} className="space-y-4">
+            <div className="space-y-1.5">
+              <label className="text-xs font-semibold text-slate-600 uppercase tracking-wider block">
+                Access Password
+              </label>
+              <div className="relative">
+                <input
+                  type={showPassword ? "text" : "password"}
+                  value={passwordInput}
+                  onChange={(e) => {
+                    setPasswordInput(e.target.value);
+                    setPasswordError("");
+                  }}
+                  autoFocus
+                  placeholder="Enter password"
+                  className="w-full border border-slate-200 rounded-xl px-4 py-3 pr-11 text-sm text-slate-700 placeholder:text-slate-400 focus:outline-none focus:ring-2 focus:ring-indigo-400 focus:border-transparent transition-all"
+                />
+                <button
+                  type="button"
+                  onClick={() => setShowPassword(!showPassword)}
+                  className="absolute right-3 top-1/2 -translate-y-1/2 text-slate-400 hover:text-slate-600 p-1 cursor-pointer"
+                  tabIndex={-1}
+                >
+                  {showPassword ? <EyeOff size={18} /> : <Eye size={18} />}
+                </button>
+              </div>
+              {passwordError && (
+                <p className="text-xs text-rose-500 pt-1 font-medium">{passwordError}</p>
+              )}
+            </div>
+
+            <button
+              type="submit"
+              className="w-full bg-indigo-600 hover:bg-indigo-700 text-white rounded-xl py-3.5 px-4 font-semibold transition-colors shadow-lg shadow-indigo-200 cursor-pointer flex items-center justify-center gap-2"
+            >
+              <Unlock size={18} />
+              <span>Unlock ChatP2P</span>
+            </button>
+          </form>
+
+          <p className="text-center text-[11px] text-slate-400">
+            PartyKit relay connection is blocked until authenticated.
+          </p>
+        </div>
+      </div>
+    );
+  }
+
+  // ── 2. Unlocked: Lobby screen ──────────────────────────────
   if (!roomId) {
     return (
       <div className="h-[100dvh] max-h-[100dvh] w-screen bg-[#f8fafc] text-[#1e293b] font-sans flex items-center justify-center p-4 overflow-hidden">
         <div className="max-w-md w-full bg-white rounded-2xl shadow-sm border border-slate-200 p-8 space-y-6">
+          {/* Top status bar */}
+          <div className="flex justify-between items-center pb-1 border-b border-slate-100">
+            <div className="flex items-center gap-1.5 text-xs text-emerald-600 font-medium bg-emerald-50 px-2.5 py-1 rounded-full border border-emerald-100">
+              <ShieldCheck size={13} /> Unlocked
+            </div>
+            <button
+              onClick={handleLock}
+              className="text-xs text-slate-400 hover:text-rose-500 flex items-center gap-1 transition-colors cursor-pointer"
+              title="Lock session"
+            >
+              <LogOut size={13} /> Lock
+            </button>
+          </div>
+
           {/* Header */}
           <div className="text-center space-y-3">
             <div className="w-16 h-16 bg-indigo-100 text-indigo-700 rounded-2xl flex items-center justify-center mx-auto font-bold">
@@ -107,11 +248,20 @@ export default function App() {
     );
   }
 
-  return <ChatRoom roomId={roomId} />;
+  // ── 3. Unlocked: Chat Room ─────────────────────────────────
+  return <ChatRoom roomId={roomId} password={password} onLock={handleLock} />;
 }
 
-function ChatRoom({ roomId }: { roomId: string }) {
-  const { status, peerCount, messages, sendMessage, sendFile, retryConnection } = useWebRTC(roomId);
+function ChatRoom({
+  roomId,
+  password,
+  onLock,
+}: {
+  roomId: string;
+  password: string;
+  onLock: () => void;
+}) {
+  const { status, peerCount, messages, sendMessage, sendFile, retryConnection } = useWebRTC(roomId, password);
   const [text, setText] = useState("");
   const fileInputRef = useRef<HTMLInputElement>(null);
   const scrollRef = useRef<HTMLDivElement>(null);
@@ -123,8 +273,12 @@ function ChatRoom({ roomId }: { roomId: string }) {
     }
   }, [messages]);
 
+  const shareUrl = typeof window !== "undefined"
+    ? `${window.location.origin}${window.location.pathname}?room=${roomId}&pwd=${encodeURIComponent(password)}`
+    : "";
+
   const handleCopyLink = () => {
-    navigator.clipboard.writeText(window.location.href);
+    navigator.clipboard.writeText(shareUrl || window.location.href);
     setCopied(true);
     setTimeout(() => setCopied(false), 2000);
   };
@@ -200,10 +354,19 @@ function ChatRoom({ roomId }: { roomId: string }) {
 
             <button
               onClick={handleCopyLink}
-              className="flex items-center gap-1.5 px-3 py-1.5 hover:bg-slate-100 rounded-lg text-slate-600 text-xs sm:text-sm font-medium transition-colors border border-slate-200"
+              className="flex items-center gap-1.5 px-3 py-1.5 hover:bg-slate-100 rounded-lg text-slate-600 text-xs sm:text-sm font-medium transition-colors border border-slate-200 cursor-pointer"
             >
               {copied ? <Check size={14} className="text-emerald-500" /> : <Link size={14} />}
               <span>{copied ? "Copied" : "Copy Link"}</span>
+            </button>
+
+            <button
+              onClick={onLock}
+              title="Lock session"
+              className="flex items-center gap-1.5 px-2.5 py-1.5 hover:bg-rose-50 hover:text-rose-600 text-slate-400 rounded-lg text-xs sm:text-sm font-medium transition-colors border border-slate-200 cursor-pointer"
+            >
+              <LogOut size={14} />
+              <span className="hidden sm:inline">Lock</span>
             </button>
           </div>
         </header>
@@ -213,7 +376,7 @@ function ChatRoom({ roomId }: { roomId: string }) {
           {status !== "connected" && messages.length === 0 && (
             <div className="h-full flex flex-col items-center justify-center text-center max-w-sm mx-auto space-y-5 my-auto py-8">
               <div className="bg-white p-5 rounded-2xl shadow-sm border border-slate-200 flex flex-col items-center">
-                <QRCodeSVG value={currentUrl} size={180} level="M" className="text-slate-900" />
+                <QRCodeSVG value={shareUrl || currentUrl} size={180} level="M" className="text-slate-900" />
                 <p className="text-[11px] text-slate-400 mt-3">Scan with another phone or camera</p>
               </div>
 

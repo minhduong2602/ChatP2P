@@ -10,8 +10,8 @@
     "preview": "vite preview",
     "clean": "rm -rf dist server.js",
     "lint": "tsc --noEmit",
-    "party:dev": "partykit dev",
-    "party:deploy": "partykit deploy"
+    "party:dev": "npx partykit dev",
+    "party:deploy": "npx partykit deploy"
   },
   "dependencies": {
     "@google/genai": "^2.4.0",
