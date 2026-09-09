@@ -488,28 +488,38 @@ function ChatRoom({
                 room: <span className="text-[#8f8f8f]">{roomId}</span>
               </span>
 
-              {/* Status Pill */}
+              {/* Status dot (mobile) — full pill on sm+ */}
               <div className="flex items-center shrink-0">
+                {/* Mobile: small colored dot only */}
+                <span className={cn(
+                  "sm:hidden w-2 h-2 rounded-full",
+                  status === "connected" ? "bg-emerald-500" :
+                  status === "waiting"   ? "bg-amber-500 animate-pulse" :
+                  status === "connecting" ? "bg-sky-500 animate-pulse" :
+                  "bg-rose-500"
+                )} />
+
+                {/* Desktop: full pill */}
                 {status === "connected" && (
-                  <span className="font-mono text-[11px] px-2.5 py-0.5 rounded-full border border-emerald-200 bg-emerald-50 text-emerald-700 flex items-center gap-1.5">
+                  <span className="hidden sm:flex font-mono text-[11px] px-2.5 py-0.5 rounded-full border border-emerald-200 bg-emerald-50 text-emerald-700 items-center gap-1.5">
                     <span className="w-1.5 h-1.5 rounded-full bg-emerald-500" />
                     <span>CONNECTED ({peerCount} PEERS)</span>
                   </span>
                 )}
                 {status === "waiting" && (
-                  <span className="font-mono text-[11px] px-2.5 py-0.5 rounded-full border border-amber-200 bg-amber-50 text-amber-700 flex items-center gap-1.5">
+                  <span className="hidden sm:flex font-mono text-[11px] px-2.5 py-0.5 rounded-full border border-amber-200 bg-amber-50 text-amber-700 items-center gap-1.5">
                     <span className="w-1.5 h-1.5 rounded-full bg-amber-500 animate-pulse" />
                     <span>WAITING FOR PEER</span>
                   </span>
                 )}
                 {status === "connecting" && (
-                  <span className="font-mono text-[11px] px-2.5 py-0.5 rounded-full border border-sky-200 bg-sky-50 text-sky-700 flex items-center gap-1.5">
+                  <span className="hidden sm:flex font-mono text-[11px] px-2.5 py-0.5 rounded-full border border-sky-200 bg-sky-50 text-sky-700 items-center gap-1.5">
                     <span className="w-1.5 h-1.5 rounded-full bg-sky-500 animate-pulse" />
                     <span>CONNECTING</span>
                   </span>
                 )}
                 {status === "disconnected" && (
-                  <span className="font-mono text-[11px] px-2.5 py-0.5 rounded-full border border-rose-200 bg-rose-50 text-rose-700 flex items-center gap-1.5">
+                  <span className="hidden sm:flex font-mono text-[11px] px-2.5 py-0.5 rounded-full border border-rose-200 bg-rose-50 text-rose-700 items-center gap-1.5">
                     <span className="w-1.5 h-1.5 rounded-full bg-rose-500" />
                     <span>DISCONNECTED</span>
                   </span>
@@ -745,15 +755,25 @@ function ChatRoom({
               <ArrowUp size={16} />
             </button>
           </form>
-          <div className="flex justify-between items-center mt-2 px-1">
-            <p className="font-mono text-[10px] text-[#8f8f8f] tracking-wide">
-              DIRECT P2P DATACHANNEL // END-TO-END ENCRYPTED // ZERO SERVER LOGS
+          {/* Bottom status bar */}
+          <div className="flex items-center justify-between mt-2 px-1">
+            {/* Mobile: full status label here */}
+            <span className={cn(
+              "sm:hidden font-mono text-[10px] uppercase tracking-wide",
+              status === "connected"   ? "text-emerald-600" :
+              status === "waiting"     ? "text-amber-600" :
+              status === "connecting"  ? "text-sky-600" :
+              "text-rose-600"
+            )}>
+              {status === "connected"   && `● CONNECTED (${peerCount} PEERS)`}
+              {status === "waiting"     && "● WAITING FOR PEER"}
+              {status === "connecting"  && "● CONNECTING..."}
+              {status === "disconnected" && "● DISCONNECTED"}
+            </span>
+            {/* Desktop: security tagline */}
+            <p className="hidden sm:block font-mono text-[10px] text-[#8f8f8f] tracking-wide">
+              DIRECT P2P // END-TO-END ENCRYPTED // ZERO LOGS
             </p>
-            {status === "connected" && (
-              <p className="font-mono text-[10px] text-[#8f8f8f]">
-                Drag & drop to attach
-              </p>
-            )}
           </div>
         </footer>
       </div>
