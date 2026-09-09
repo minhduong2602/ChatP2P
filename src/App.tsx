@@ -980,7 +980,7 @@ function MessageBubble({
                 onClick={() => setShowPicker((v) => !v)}
                 className={cn(
                   "p-0.5 rounded-full border transition-all cursor-pointer",
-                  "bg-white border-[#ebebeb] text-[#8f8f8f] hover:text-[#171717] hover:border-[#171717]",
+                  "bg-white border-[#9C9C9C] text-[#9C9C9C] hover:text-[#171717] hover:border-[#171717]",
                   "opacity-0 group-hover:opacity-100 max-sm:opacity-50",
                   showPicker && "opacity-100 border-[#171717] text-[#171717]"
                 )}
