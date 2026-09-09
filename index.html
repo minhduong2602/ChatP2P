@@ -3,12 +3,22 @@
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>Secure P2P Chat — Zero-Log Edge Relay</title>
-    <meta name="description" content="End-to-end encrypted direct peer-to-peer chat with zero server message logging." />
-    <meta property="og:title" content="Secure P2P Chat" />
+    <title>ChatP2P — Secure P2P Messaging</title>
+    <meta name="description" content="End-to-end encrypted direct peer-to-peer chat with zero server message logging. Powered by Cloudflare Edge." />
+    <meta property="og:title" content="ChatP2P — Secure P2P Messaging" />
     <meta property="og:description" content="End-to-end encrypted direct peer-to-peer chat with zero server message logging." />
     <meta property="og:type" content="website" />
     <meta name="twitter:card" content="summary_large_image" />
+
+    <!-- PWA -->
+    <link rel="manifest" href="/manifest.json" />
+    <meta name="theme-color" content="#171717" />
+    <meta name="apple-mobile-web-app-capable" content="yes" />
+    <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
+    <meta name="apple-mobile-web-app-title" content="ChatP2P" />
+    <link rel="apple-touch-icon" href="/icon-192.png" />
+
+    <!-- Fonts -->
     <link rel="preconnect" href="https://fonts.googleapis.com" />
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
     <link href="https://fonts.googleapis.com/css2?family=Geist:wght@300;400;500;600;700&family=Geist+Mono:wght@400;500;600&display=swap" rel="stylesheet" />
@@ -18,4 +28,3 @@
     <script type="module" src="/src/main.tsx"></script>
   </body>
 </html>
-
