@@ -984,6 +984,40 @@ function MessageBubble({
             </div>
           )}
         </div>
+
+        {/* Reactions pills */}
+        {hasReactions && (
+          <div className={cn("flex flex-wrap gap-1 mt-1 px-1", isMe ? "justify-end" : "justify-start")}>
+            {Object.entries(msgReactions).map(([emoji, count]) =>
+              count > 0 ? (
+                <button
+                  key={emoji}
+                  onClick={() => onReact?.(emoji)}
+                  className="flex items-center gap-0.5 px-1.5 py-0.5 bg-white border border-[#ebebeb] rounded-full text-xs hover:border-[#171717] transition-colors cursor-pointer shadow-sm"
+                  title={`React ${emoji}`}
+                >
+                  <span>{emoji}</span>
+                  <span className="font-mono text-[10px] text-[#4d4d4d]">{count}</span>
+                </button>
+              ) : null
+            )}
+          </div>
+        )}
+
+        {/* Timestamp */}
+        <div className={cn(
+          "flex items-center gap-1.5 mt-1 px-1",
+          isMe ? "justify-end" : "justify-start"
+        )}>
+          <span className="font-mono text-[10px] text-[#8f8f8f]">
+            {format(msg.timestamp, "HH:mm")}
+          </span>
+          {msg.type === "text" && copied && (
+            <span className="font-mono text-[10px] text-emerald-600 font-medium flex items-center gap-0.5">
+              <Check size={10} /> Copied!
+            </span>
+          )}
+        </div>
       </div>
     </div>
   );
