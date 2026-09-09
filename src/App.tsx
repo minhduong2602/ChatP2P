@@ -841,11 +841,12 @@ function MessageBubble({
           isMe ? "items-end" : "items-start"
         )}
       >
-        {/* Bubble wrapper — relative so 😊 button can be absolutely positioned */}
-        <div className="relative">
+        {/* Outer wrapper: group here so both copy & 😊 buttons respond to hover */}
+        <div className={cn("relative group pb-4")}>
+          {/* Bubble */}
           <div
             className={cn(
-              "relative group rounded-[12px] overflow-hidden text-sm leading-relaxed",
+              "rounded-[12px] overflow-hidden text-sm leading-relaxed",
               isMe
                 ? "bg-[#171717] text-white rounded-br-[2px]"
                 : "bg-white border border-[#ebebeb] text-[#171717] rounded-bl-[2px] shadow-[0_1px_2px_rgba(0,0,0,0.02)]"
@@ -907,10 +908,7 @@ function MessageBubble({
               </div>
             ) : (
               /* ── Generic file ─────────────────────── */
-              <div className={cn(
-                "flex items-center gap-3 p-2.5",
-                isMe ? "text-white" : "text-[#171717]"
-              )}>
+              <div className={cn("flex items-center gap-3 p-2.5", isMe ? "text-white" : "text-[#171717]")}>
                 <div className={cn(
                   "h-9 w-9 rounded-[4px] border flex items-center justify-center shrink-0",
                   isMe ? "bg-white/10 border-white/20 text-white" : "bg-white border-[#ebebeb] text-[#171717]"
@@ -942,21 +940,19 @@ function MessageBubble({
             )}
           </div>
 
-          {/* 😊 Reaction trigger — absolute at bottom-right corner of bubble */}
+          {/* 😊 Reaction trigger — hidden until hover, absolute at bottom corner */}
           {onReact && (
             <div
-              className={cn(
-                "absolute -bottom-3 z-10",
-                isMe ? "left-1" : "right-1"
-              )}
+              className={cn("absolute bottom-1 z-10", isMe ? "left-1" : "right-1")}
               ref={pickerRef}
             >
               <button
                 onClick={() => setShowPicker((v) => !v)}
                 className={cn(
                   "p-1 rounded-full border transition-all cursor-pointer select-none text-sm leading-none shadow-sm",
+                  "opacity-0 group-hover:opacity-100 max-sm:opacity-50 transition-opacity",
                   showPicker
-                    ? "bg-[#f5f5f5] border-[#171717]"
+                    ? "!opacity-100 bg-[#f5f5f5] border-[#171717]"
                     : "bg-white border-[#d0d0d0] hover:border-[#171717] hover:bg-[#f5f5f5]"
                 )}
                 title="Add reaction"
@@ -967,7 +963,7 @@ function MessageBubble({
                 <div
                   className={cn(
                     "reaction-picker absolute z-20 bg-white border border-[#ebebeb] rounded-full shadow-lg px-2 py-1.5 flex items-center gap-1",
-                    isMe ? "bottom-6 right-0" : "bottom-6 left-0"
+                    isMe ? "bottom-9 left-0" : "bottom-9 right-0"
                   )}
                 >
                   {EMOJI_LIST.map((emoji) => (
