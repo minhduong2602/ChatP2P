@@ -841,152 +841,127 @@ function MessageBubble({
           isMe ? "items-end" : "items-start"
         )}
       >
-        {/* Bubble */}
-        <div
-          className={cn(
-            "relative group rounded-[12px] overflow-hidden text-sm leading-relaxed",
-            isMe
-              ? "bg-[#171717] text-white rounded-br-[2px]"
-              : "bg-white border border-[#ebebeb] text-[#171717] rounded-bl-[2px] shadow-[0_1px_2px_rgba(0,0,0,0.02)]"
-          )}
-        >
-          {msg.type === "text" ? (
-            /* ── Text message ─────────────────────── */
-            <div className="flex items-start gap-2 p-3 sm:p-3.5">
-              <p className="whitespace-pre-wrap break-words flex-1">{msg.content}</p>
-              <button
-                onClick={handleCopy}
-                title="Copy"
-                className={cn(
-                  "p-1 rounded-[4px] transition-all shrink-0 cursor-pointer",
-                  isMe
-                    ? "text-white/60 hover:text-white hover:bg-white/10"
-                    : "text-[#8f8f8f] hover:text-[#171717] hover:bg-[#fafafa]",
-                  copied ? "opacity-100" : "opacity-0 group-hover:opacity-100 max-sm:opacity-60"
+        {/* Bubble wrapper — relative so 😊 button can be absolutely positioned */}
+        <div className="relative">
+          <div
+            className={cn(
+              "relative group rounded-[12px] overflow-hidden text-sm leading-relaxed",
+              isMe
+                ? "bg-[#171717] text-white rounded-br-[2px]"
+                : "bg-white border border-[#ebebeb] text-[#171717] rounded-bl-[2px] shadow-[0_1px_2px_rgba(0,0,0,0.02)]"
+            )}
+          >
+            {msg.type === "text" ? (
+              /* ── Text message ─────────────────────── */
+              <div className="flex items-start gap-2 p-3 sm:p-3.5">
+                <p className="whitespace-pre-wrap break-words flex-1">{msg.content}</p>
+                <button
+                  onClick={handleCopy}
+                  title="Copy"
+                  className={cn(
+                    "p-1 rounded-[4px] transition-all shrink-0 cursor-pointer",
+                    isMe
+                      ? "text-white/60 hover:text-white hover:bg-white/10"
+                      : "text-[#8f8f8f] hover:text-[#171717] hover:bg-[#fafafa]",
+                    copied ? "opacity-100" : "opacity-0 group-hover:opacity-100 max-sm:opacity-60"
+                  )}
+                >
+                  {copied ? (
+                    <Check size={12} className={isMe ? "text-white" : "text-emerald-600"} />
+                  ) : (
+                    <Copy size={12} />
+                  )}
+                </button>
+              </div>
+            ) : isImage ? (
+              /* ── Image preview ────────────────────── */
+              <div style={{ maxWidth: 260 }}>
+                <img
+                  src={msg.fileUrl}
+                  alt={msg.content}
+                  className="w-full object-cover block"
+                  style={{ maxHeight: 300 }}
+                />
+                {msg.fileUrl && (
+                  <div className={cn(
+                    "flex items-center justify-between px-3 py-2",
+                    isMe ? "bg-white/10" : "bg-[#fafafa] border-t border-[#ebebeb]"
+                  )}>
+                    <span className={cn("font-mono text-[9px] uppercase truncate flex-1", isMe ? "text-white/60" : "text-[#8f8f8f]")}>
+                      {msg.content}
+                      {msg.fileSize ? ` · ${formatFileSize(msg.fileSize)}` : ""}
+                    </span>
+                    <a
+                      href={msg.fileUrl}
+                      download={msg.content}
+                      className={cn(
+                        "ml-2 p-1 rounded-[4px] transition-colors cursor-pointer",
+                        isMe ? "text-white/70 hover:text-white hover:bg-white/10" : "text-[#8f8f8f] hover:text-[#171717] hover:bg-[#ebebeb]"
+                      )}
+                      title="Download"
+                    >
+                      <Download size={12} />
+                    </a>
+                  </div>
                 )}
-              >
-                {copied ? (
-                  <Check size={12} className={isMe ? "text-white" : "text-emerald-600"} />
-                ) : (
-                  <Copy size={12} />
-                )}
-              </button>
-            </div>
-          ) : isImage ? (
-            /* ── Image preview ────────────────────── */
-            <div style={{ maxWidth: 260 }}>
-              <img
-                src={msg.fileUrl}
-                alt={msg.content}
-                className="w-full object-cover block"
-                style={{ maxHeight: 300 }}
-              />
-              {msg.fileUrl && (
+              </div>
+            ) : (
+              /* ── Generic file ─────────────────────── */
+              <div className={cn(
+                "flex items-center gap-3 p-2.5",
+                isMe ? "text-white" : "text-[#171717]"
+              )}>
                 <div className={cn(
-                  "flex items-center justify-between px-3 py-2",
-                  isMe ? "bg-white/10" : "bg-[#fafafa] border-t border-[#ebebeb]"
+                  "h-9 w-9 rounded-[4px] border flex items-center justify-center shrink-0",
+                  isMe ? "bg-white/10 border-white/20 text-white" : "bg-white border-[#ebebeb] text-[#171717]"
                 )}>
-                  <span className={cn("font-mono text-[9px] uppercase truncate flex-1", isMe ? "text-white/60" : "text-[#8f8f8f]")}>
+                  <FileText size={18} />
+                </div>
+                <div className="overflow-hidden pr-2 flex-1 min-w-0">
+                  <p className={cn("text-xs font-semibold truncate max-w-[120px] sm:max-w-[180px]", isMe ? "text-white" : "text-[#171717]")}>
                     {msg.content}
+                  </p>
+                  <p className={cn("font-mono text-[9px] uppercase mt-0.5", isMe ? "text-white/60" : "text-[#8f8f8f]")}>
+                    {isMe ? "Sent" : "Received"}
                     {msg.fileSize ? ` · ${formatFileSize(msg.fileSize)}` : ""}
-                  </span>
+                  </p>
+                </div>
+                {msg.fileUrl && (
                   <a
                     href={msg.fileUrl}
                     download={msg.content}
                     className={cn(
-                      "ml-2 p-1 rounded-[4px] transition-colors cursor-pointer",
-                      isMe ? "text-white/70 hover:text-white hover:bg-white/10" : "text-[#8f8f8f] hover:text-[#171717] hover:bg-[#ebebeb]"
+                      "ml-auto px-2.5 py-1 rounded-[6px] font-mono text-xs font-medium flex items-center gap-1 shrink-0 transition-colors",
+                      isMe ? "bg-white text-[#171717] hover:bg-[#f2f2f2]" : "bg-[#171717] text-white hover:bg-black"
                     )}
-                    title="Download"
                   >
                     <Download size={12} />
                   </a>
-                </div>
-              )}
-            </div>
-          ) : (
-            /* ── Generic file ─────────────────────── */
-            <div className={cn(
-              "flex items-center gap-3 p-2.5",
-              isMe ? "text-white" : "text-[#171717]"
-            )}>
-              <div className={cn(
-                "h-9 w-9 rounded-[4px] border flex items-center justify-center shrink-0",
-                isMe ? "bg-white/10 border-white/20 text-white" : "bg-white border-[#ebebeb] text-[#171717]"
-              )}>
-                <FileText size={18} />
+                )}
               </div>
-              <div className="overflow-hidden pr-2 flex-1 min-w-0">
-                <p className={cn("text-xs font-semibold truncate max-w-[120px] sm:max-w-[180px]", isMe ? "text-white" : "text-[#171717]")}>
-                  {msg.content}
-                </p>
-                <p className={cn("font-mono text-[9px] uppercase mt-0.5", isMe ? "text-white/60" : "text-[#8f8f8f]")}>
-                  {isMe ? "Sent" : "Received"}
-                  {msg.fileSize ? ` · ${formatFileSize(msg.fileSize)}` : ""}
-                </p>
-              </div>
-              {msg.fileUrl && (
-                <a
-                  href={msg.fileUrl}
-                  download={msg.content}
-                  className={cn(
-                    "ml-auto px-2.5 py-1 rounded-[6px] font-mono text-xs font-medium flex items-center gap-1 shrink-0 transition-colors",
-                    isMe ? "bg-white text-[#171717] hover:bg-[#f2f2f2]" : "bg-[#171717] text-white hover:bg-black"
-                  )}
-                >
-                  <Download size={12} />
-                </a>
-              )}
-            </div>
-          )}
-        </div>
-
-        {/* Reactions row */}
-        {hasReactions && (
-          <div className={cn("flex flex-wrap gap-1 mt-1.5 px-1", isMe ? "justify-end" : "justify-start")}>
-            {Object.entries(msgReactions).map(([emoji, count]) => (
-              count > 0 && (
-                <button
-                  key={emoji}
-                  onClick={() => onReact?.(emoji)}
-                  className="flex items-center gap-0.5 px-1.5 py-0.5 bg-white border border-[#ebebeb] rounded-full text-xs hover:border-[#171717] transition-colors cursor-pointer shadow-sm"
-                  title={`React ${emoji}`}
-                >
-                  <span>{emoji}</span>
-                  <span className="font-mono text-[10px] text-[#4d4d4d]">{count}</span>
-                </button>
-              )
-            ))}
+            )}
           </div>
-        )}
 
-        {/* Timestamp + reaction trigger row */}
-        <div className={cn(
-          "flex items-center gap-1.5 mt-1.5 px-1",
-          isMe ? "flex-row-reverse" : "flex-row"
-        )}>
-          <span className="font-mono text-[10px] text-[#8f8f8f]">
-            {format(msg.timestamp, "HH:mm")}
-          </span>
-          {msg.type === "text" && copied && (
-            <span className="font-mono text-[10px] text-emerald-600 font-medium flex items-center gap-0.5">
-              <Check size={10} /> Copied!
-            </span>
-          )}
-          {/* Emoji trigger — inline with timestamp */}
+          {/* 😊 Reaction trigger — absolute at bottom-right corner of bubble */}
           {onReact && (
-            <div className="relative" ref={pickerRef}>
+            <div
+              className={cn(
+                "absolute -bottom-3 z-10",
+                isMe ? "left-1" : "right-1"
+              )}
+              ref={pickerRef}
+            >
               <button
                 onClick={() => setShowPicker((v) => !v)}
                 className={cn(
-                  "p-0.5 rounded-full border transition-all cursor-pointer",
-                  "bg-white border-[#9C9C9C] text-[#9C9C9C] hover:text-[#171717] hover:border-[#171717]",
-                  "opacity-0 group-hover:opacity-100 max-sm:opacity-50",
-                  showPicker && "opacity-100 border-[#171717] text-[#171717]"
+                  "p-1 rounded-full border transition-all cursor-pointer select-none text-sm leading-none shadow-sm",
+                  showPicker
+                    ? "bg-[#f5f5f5] border-[#171717]"
+                    : "bg-white border-[#d0d0d0] hover:border-[#171717] hover:bg-[#f5f5f5]"
                 )}
                 title="Add reaction"
               >
-                <Smile size={10} />
+                😊
               </button>
               {showPicker && (
                 <div
