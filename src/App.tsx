@@ -41,6 +41,19 @@ function formatFileSize(bytes: number): string {
   return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
 }
 
+const AVATAR_COLORS = [
+  "bg-blue-500", "bg-indigo-500", "bg-purple-500", "bg-pink-500", 
+  "bg-rose-500", "bg-orange-500", "bg-green-500", "bg-teal-500"
+];
+function getAvatarColor(id: string) {
+  let hash = 0;
+  for (let i = 0; i < id.length; i++) hash = id.charCodeAt(i) + ((hash << 5) - hash);
+  return AVATAR_COLORS[Math.abs(hash) % AVATAR_COLORS.length];
+}
+function getInitials(name: string) {
+  return name.slice(0, 2).toUpperCase();
+}
+
 function VercelTriangle({ className = "w-4 h-4 text-[#171717]" }: { className?: string }) {
   return (
     <svg viewBox="0 0 75 65" height="14" width="16" fill="currentColor" className={className}>
@@ -73,6 +86,10 @@ export default function App() {
   const [joinInput, setJoinInput] = useState("");
   const [joinError, setJoinError] = useState("");
   const [showScanner, setShowScanner] = useState(false);
+  
+  const [nickname, setNickname] = useState(() => {
+    return localStorage.getItem("chatp2p_nickname") || "";
+  });
 
   useEffect(() => {
     const params = new URLSearchParams(window.location.search);
@@ -247,6 +264,24 @@ export default function App() {
             </p>
           </div>
 
+          {/* Nickname Input */}
+          <div className="space-y-1.5 pb-2 border-b border-[#ebebeb]">
+            <label className="font-mono text-[11px] font-medium text-[#4d4d4d] uppercase tracking-wider block">
+              Your Nickname (Optional)
+            </label>
+            <input
+              type="text"
+              value={nickname}
+              onChange={(e) => {
+                const val = e.target.value;
+                setNickname(val);
+                localStorage.setItem("chatp2p_nickname", val);
+              }}
+              placeholder="Leave empty for random name"
+              className="w-full font-mono rounded-[6px] border border-[#ebebeb] px-3.5 py-2 text-sm text-[#171717] placeholder:text-[#a1a1a1] focus:border-[#171717] focus:ring-1 focus:ring-[#171717] focus:outline-none transition-colors"
+            />
+          </div>
+
           {/* Create new room */}
           <button
             id="start-chat-btn"
@@ -313,7 +348,7 @@ export default function App() {
   }
 
   // ── 3. Unlocked: Chat Room ───────────────────────────────────
-  return <ChatRoom roomId={roomId} password={password} onLock={handleLock} />;
+  return <ChatRoom roomId={roomId} nickname={nickname || `Peer-${uuidv4().slice(0, 4).toUpperCase()}`} password={password} onLock={handleLock} />;
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -322,16 +357,19 @@ export default function App() {
 
 function ChatRoom({
   roomId,
+  nickname,
   password,
   onLock,
 }: {
   roomId: string;
+  nickname: string;
   password: string;
   onLock: () => void;
 }) {
   const {
     status,
     peerCount,
+    peers,
     messages,
     sendMessage,
     sendFiles,
@@ -340,9 +378,9 @@ function ChatRoom({
     clearMessages,
     retryConnection,
     transferProgress,
-    isPeerTyping,
+    typingPeers,
     reactions,
-  } = useWebRTC(roomId, password);
+  } = useWebRTC(roomId, nickname, password);
 
   const { notify } = useNotification();
 
@@ -381,7 +419,7 @@ function ChatRoom({
     // Notify for incoming messages only
     if (messages.length > prevMsgCount.current) {
       const latest = messages[messages.length - 1];
-      if (latest?.sender === "peer") notify();
+      if (!latest?.isMe) notify();
     }
     prevMsgCount.current = messages.length;
   }, [messages, notify]);
@@ -683,29 +721,45 @@ function ChatRoom({
           )}
 
           <div className="space-y-4">
-            {messages.map((msg) => {
+            {messages.map((msg, index) => {
               const msgId = msg.id;
+              const prevMsg = messages[index - 1];
+              // Show avatar if it's the first message in a sequence from this peer
+              const showAvatar = !prevMsg || prevMsg.senderId !== msg.senderId;
+              
               return (
                 <MessageBubble
                   key={msgId}
                   msg={msg}
                   msgReactions={reactions[msgId]}
                   onReact={(emoji) => sendReaction(msgId, emoji)}
+                  showAvatar={showAvatar}
                 />
               );
             })}
           </div>
 
           {/* Typing indicator */}
-          {isPeerTyping && (
+          {typingPeers.size > 0 && (
             <div className="flex items-end gap-2.5 mt-4 msg-from-peer">
               <div className="h-6 w-6 rounded-[4px] border border-[#ebebeb] bg-white text-[#171717] font-mono text-[10px] font-semibold flex items-center justify-center shrink-0">
-                P
+                💬
               </div>
-              <div className="bg-white border border-[#ebebeb] rounded-[12px] rounded-bl-[2px] shadow-[0_1px_2px_rgba(0,0,0,0.02)] px-4 py-3 flex items-center gap-1">
-                <span className="typing-dot" />
-                <span className="typing-dot" />
-                <span className="typing-dot" />
+              <div className="flex flex-col items-start gap-1">
+                <span className="text-[10px] text-[#8f8f8f] font-mono uppercase tracking-wider ml-1">
+                  {(() => {
+                    const arr = Array.from(typingPeers);
+                    const names = arr.map(id => peers[id] || "Someone");
+                    if (names.length === 1) return `${names[0]} is typing...`;
+                    if (names.length === 2) return `${names[0]} & ${names[1]} are typing...`;
+                    return "Multiple people are typing...";
+                  })()}
+                </span>
+                <div className="bg-white border border-[#ebebeb] rounded-[12px] rounded-bl-[2px] shadow-[0_1px_2px_rgba(0,0,0,0.02)] px-4 py-3 flex items-center gap-1">
+                  <span className="typing-dot" />
+                  <span className="typing-dot" />
+                  <span className="typing-dot" />
+                </div>
               </div>
             </div>
           )}
@@ -789,13 +843,15 @@ function MessageBubble({
   msg,
   msgReactions,
   onReact,
+  showAvatar = true,
 }: {
   key?: React.Key;
   msg: Message;
   msgReactions?: Record<string, number>;
   onReact?: (emoji: string) => void;
+  showAvatar?: boolean;
 }) {
-  const isMe = msg.sender === "me";
+  const isMe = msg.isMe;
   const [copied, setCopied] = useState(false);
   const [showPicker, setShowPicker] = useState(false);
   const pickerRef = useRef<HTMLDivElement>(null);
@@ -830,8 +886,20 @@ function MessageBubble({
       )}
     >
       {!isMe && (
-        <div className="h-6 w-6 rounded-[4px] border border-[#ebebeb] bg-white text-[#171717] font-mono text-[10px] font-semibold flex items-center justify-center shrink-0">
-          P
+        <div className="flex flex-col items-center shrink-0 w-8">
+          {showAvatar ? (
+            <div
+              className={cn(
+                "h-8 w-8 rounded-[8px] text-white font-mono text-xs font-semibold flex items-center justify-center shadow-sm",
+                getAvatarColor(msg.senderId)
+              )}
+              title={msg.senderName}
+            >
+              {getInitials(msg.senderName || "Unknown")}
+            </div>
+          ) : (
+            <div className="h-8 w-8" /> // placeholder spacer
+          )}
         </div>
       )}
 
@@ -841,6 +909,12 @@ function MessageBubble({
           isMe ? "items-end" : "items-start"
         )}
       >
+        {!isMe && showAvatar && msg.senderName && (
+          <span className="text-[10px] text-[#8f8f8f] font-mono uppercase tracking-wider mb-1 ml-1">
+            {msg.senderName}
+          </span>
+        )}
+
         {/* Outer wrapper: group here so both copy & 😊 buttons respond to hover */}
         <div className={cn("relative group pb-4")}>
           {/* Bubble */}

@@ -32,7 +32,7 @@ export default class ChatSignalingServer implements Party.Server {
 
     console.log(`[PartyKit] +conn ${conn.id} room="${this.room.id}" peers=${numClients}`);
 
-    if (numClients > 2) {
+    if (numClients > 50) {
       conn.send(JSON.stringify({ type: "room-full" }));
       conn.close(4000, "room-full");
       return;
@@ -53,9 +53,12 @@ export default class ChatSignalingServer implements Party.Server {
   onMessage(message: string, sender: Party.Connection) {
     try {
       const data = JSON.parse(message);
+      // Inject the sender's ID so other peers know who sent it
+      data.senderId = sender.id;
+      
       console.log(`[PartyKit] relay "${data.type}" from ${sender.id}`);
-      // Relay everything to all other peers
-      this.room.broadcast(message, [sender.id]);
+      // Relay to all other peers
+      this.room.broadcast(JSON.stringify(data), [sender.id]);
     } catch {
       console.warn("[PartyKit] Non-JSON message ignored");
     }

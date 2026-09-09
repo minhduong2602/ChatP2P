@@ -4,7 +4,9 @@ import { v4 as uuidv4 } from "uuid";
 
 export type Message = {
   id: string;
-  sender: "me" | "peer";
+  senderId: string;
+  isMe: boolean;
+  senderName?: string;
   type: "text" | "file";
   content: string;
   fileUrl?: string;
@@ -32,29 +34,34 @@ export type Reactions = Record<string, Record<string, number>>; // msgId → emo
 // File chunking constants for relay
 const CHUNK_SIZE = 32 * 1024; // 32 KB per chunk as base64 over WebSocket
 
-export function useWebRTC(roomId: string | null, password?: string) {
+export function useWebRTC(roomId: string | null, nickname: string, password?: string) {
   const [status, setStatus] = useState<ConnectionStatus>("connecting");
   const [peerCount, setPeerCount] = useState<number>(1);
+  const [peers, setPeers] = useState<Record<string, string>>({}); // peerId -> nickname
   const [messages, setMessages] = useState<Message[]>([]);
   const [transferProgress, setTransferProgress] = useState<Record<string, FileProgress>>({});
-  const [isPeerTyping, setIsPeerTyping] = useState(false);
+  const [typingPeers, setTypingPeers] = useState<Set<string>>(new Set());
   const [reactions, setReactions] = useState<Reactions>({});
 
   const socketRef = useRef<PartySocket | null>(null);
   const myPeerIdRef = useRef<string>("");
-  const peerTypingTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const peersRef = useRef<Record<string, string>>({});
+  
+  const typingTimersRef = useRef<Record<string, ReturnType<typeof setTimeout>>>({});
   const typingCooldownRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
-  // File receiving state (chunked relay)
-  const incomingFileRef = useRef<{
+  // File receiving state (parallel downloads map)
+  type IncomingFile = {
     id: string;
+    senderId: string;
     name: string;
     size: number;
     type: string;
     totalChunks: number;
     chunks: string[];
     receivedChunks: number;
-  } | null>(null);
+  };
+  const incomingFilesRef = useRef<Record<string, IncomingFile>>({});
 
   const addMessage = useCallback((msg: Message) => {
     setMessages((prev) => [...prev, msg]);
@@ -82,8 +89,10 @@ export function useWebRTC(roomId: string | null, password?: string) {
     setStatus("connecting");
     setMessages([]);
     setPeerCount(1);
+    setPeers({});
+    peersRef.current = {};
     setTransferProgress({});
-    setIsPeerTyping(false);
+    setTypingPeers(new Set());
     setReactions({});
 
     const rawHost =
@@ -137,18 +146,32 @@ export function useWebRTC(roomId: string | null, password?: string) {
           setPeerCount(numClients);
           if (numClients >= 2) {
             setStatus("connected");
-            console.log("[Relay] Peer already present — relay ACTIVE");
           } else {
             setStatus("waiting");
-            console.log("[Relay] Waiting for peer...");
           }
+          // Broadcast our info to the room
+          sendRelayRef.current({ type: "peer-info", nickname });
           break;
         }
 
         case "peer-joined": {
-          setPeerCount(2);
+          setPeerCount((prev) => prev + 1);
           setStatus("connected");
-          console.log("[Relay] Peer joined — relay ACTIVE");
+          // Tell the new peer who we are
+          sendRelayRef.current({ type: "peer-info", nickname });
+          break;
+        }
+
+        case "peer-info": {
+          const senderId = data.senderId as string;
+          const peerNickname = data.nickname as string;
+          if (senderId && peerNickname && senderId !== myPeerIdRef.current) {
+            setPeers((prev) => {
+              const next = { ...prev, [senderId]: peerNickname };
+              peersRef.current = next;
+              return next;
+            });
+          }
           break;
         }
 
@@ -159,20 +182,39 @@ export function useWebRTC(roomId: string | null, password?: string) {
         }
 
         case "peer-disconnected": {
-          setPeerCount(1);
-          setStatus("waiting");
-          incomingFileRef.current = null;
-          setIsPeerTyping(false);
-          if (peerTypingTimerRef.current) clearTimeout(peerTypingTimerRef.current);
-          console.log("[Relay] Peer disconnected — waiting for new peer");
+          const peerId = data.peerId as string;
+          setPeerCount((prev) => {
+            const next = Math.max(1, prev - 1);
+            if (next < 2) setStatus("waiting");
+            return next;
+          });
+          setPeers((prev) => {
+            const next = { ...prev };
+            delete next[peerId];
+            peersRef.current = next;
+            return next;
+          });
+          setTypingPeers((prev) => {
+            if (!prev.has(peerId)) return prev;
+            const next = new Set(prev);
+            next.delete(peerId);
+            return next;
+          });
+          if (typingTimersRef.current[peerId]) {
+            clearTimeout(typingTimersRef.current[peerId]);
+            delete typingTimersRef.current[peerId];
+          }
           break;
         }
 
         // ── Text message relay ─────────────────────────────────
         case "chat-text": {
+          const senderId = data.senderId as string;
           addMessage({
             id: (data.id as string) || uuidv4(),
-            sender: "peer",
+            senderId,
+            isMe: false,
+            senderName: peersRef.current[senderId] || "Unknown",
             type: "text",
             content: data.content as string,
             timestamp: (data.timestamp as number) || Date.now(),
@@ -182,9 +224,21 @@ export function useWebRTC(roomId: string | null, password?: string) {
 
         // ── Typing indicator ───────────────────────────────────
         case "typing": {
-          setIsPeerTyping(true);
-          if (peerTypingTimerRef.current) clearTimeout(peerTypingTimerRef.current);
-          peerTypingTimerRef.current = setTimeout(() => setIsPeerTyping(false), 2500);
+          const senderId = data.senderId as string;
+          if (!senderId) return;
+          setTypingPeers((prev) => {
+            const next = new Set(prev);
+            next.add(senderId);
+            return next;
+          });
+          if (typingTimersRef.current[senderId]) clearTimeout(typingTimersRef.current[senderId]);
+          typingTimersRef.current[senderId] = setTimeout(() => {
+            setTypingPeers((prev) => {
+              const next = new Set(prev);
+              next.delete(senderId);
+              return next;
+            });
+          }, 2500);
           break;
         }
 
@@ -207,8 +261,10 @@ export function useWebRTC(roomId: string | null, password?: string) {
         // ── File relay (chunked) ───────────────────────────────
         case "file-start": {
           const fileId = data.id as string;
-          incomingFileRef.current = {
+          const senderId = data.senderId as string;
+          incomingFilesRef.current[fileId] = {
             id: fileId,
+            senderId,
             name: data.name as string,
             size: data.size as number,
             type: data.fileType as string,
@@ -221,12 +277,12 @@ export function useWebRTC(roomId: string | null, password?: string) {
             ...prev,
             [fileId]: { name: data.name as string, progress: 0, direction: "download", done: false },
           }));
-          console.log(`[Relay] Incoming file "${data.name}" (${data.totalChunks} chunks)`);
           break;
         }
 
         case "file-chunk": {
-          const f = incomingFileRef.current;
+          const fileId = data.id as string;
+          const f = incomingFilesRef.current[fileId];
           if (!f) return;
           const idx = data.index as number;
           f.chunks[idx] = data.chunk as string;
@@ -251,7 +307,9 @@ export function useWebRTC(roomId: string | null, password?: string) {
             const url = URL.createObjectURL(blob);
             addMessage({
               id: f.id,
-              sender: "peer",
+              senderId: f.senderId,
+              isMe: false,
+              senderName: peersRef.current[f.senderId] || "Unknown",
               type: "file",
               content: f.name,
               fileUrl: url,
@@ -272,8 +330,7 @@ export function useWebRTC(roomId: string | null, password?: string) {
                 return next;
               });
             }, 3000);
-            console.log(`[Relay] File "${f.name}" received ✓`);
-            incomingFileRef.current = null;
+            delete incomingFilesRef.current[fileId];
           }
           break;
         }
@@ -283,11 +340,12 @@ export function useWebRTC(roomId: string | null, password?: string) {
     return () => {
       socket.close();
       socketRef.current = null;
-      incomingFileRef.current = null;
-      if (peerTypingTimerRef.current) clearTimeout(peerTypingTimerRef.current);
+      incomingFilesRef.current = {};
+      Object.values(typingTimersRef.current).forEach(clearTimeout);
+      typingTimersRef.current = {};
       if (typingCooldownRef.current) clearTimeout(typingCooldownRef.current);
     };
-  }, [roomId, password, addMessage]);
+  }, [roomId, nickname, password, addMessage]);
 
   // ── sendMessage ──────────────────────────────────────────────
   const sendMessage = useCallback(
@@ -297,13 +355,15 @@ export function useWebRTC(roomId: string | null, password?: string) {
       sendRelayRef.current({ type: "chat-text", id, content: text, timestamp: Date.now() });
       addMessage({
         id,
-        sender: "me",
+        senderId: myPeerIdRef.current,
+        isMe: true,
+        senderName: nickname,
         type: "text",
         content: text,
         timestamp: Date.now(),
       });
     },
-    [status, addMessage]
+    [status, nickname, addMessage]
   );
 
   // ── sendTyping (debounced — max 1 signal/second) ──────────────
@@ -352,8 +412,6 @@ export function useWebRTC(roomId: string | null, password?: string) {
       }
       const totalChunks = chunks.length || 1;
 
-      console.log(`[Relay] Sending file "${file.name}" in ${totalChunks} chunks`);
-
       // Init upload progress
       setTransferProgress((prev) => ({
         ...prev,
@@ -384,7 +442,9 @@ export function useWebRTC(roomId: string | null, password?: string) {
 
       addMessage({
         id: fileId,
-        sender: "me",
+        senderId: myPeerIdRef.current,
+        isMe: true,
+        senderName: nickname,
         type: "file",
         content: file.name,
         fileUrl: URL.createObjectURL(file),
@@ -405,10 +465,8 @@ export function useWebRTC(roomId: string | null, password?: string) {
           return next;
         });
       }, 3000);
-
-      console.log(`[Relay] File "${file.name}" sent ✓`);
     },
-    [status, addMessage]
+    [status, nickname, addMessage]
   );
 
   // ── sendFiles (send multiple files sequentially) ─────────────
@@ -434,6 +492,7 @@ export function useWebRTC(roomId: string | null, password?: string) {
   return {
     status,
     peerCount,
+    peers,
     messages,
     sendMessage,
     sendFile,
@@ -443,7 +502,7 @@ export function useWebRTC(roomId: string | null, password?: string) {
     clearMessages,
     retryConnection,
     transferProgress,
-    isPeerTyping,
+    typingPeers,
     reactions,
   };
 }
