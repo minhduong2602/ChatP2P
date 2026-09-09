@@ -712,6 +712,7 @@ function ChatRoom({
               className="hidden"
               ref={fileInputRef}
               onChange={handleFileChange}
+              accept="*/*"
               multiple
             />
             <button
@@ -823,7 +824,7 @@ function MessageBubble({
         {/* Bubble */}
         <div
           className={cn(
-            "relative group rounded-[12px] text-sm leading-relaxed",
+            "relative group rounded-[12px] overflow-hidden text-sm leading-relaxed",
             isMe
               ? "bg-[#171717] text-white rounded-br-[2px]"
               : "bg-white border border-[#ebebeb] text-[#171717] rounded-bl-[2px] shadow-[0_1px_2px_rgba(0,0,0,0.02)]"
@@ -853,11 +854,11 @@ function MessageBubble({
             </div>
           ) : isImage ? (
             /* ── Image preview ────────────────────── */
-            <div className="overflow-hidden rounded-[12px]" style={{ maxWidth: 260 }}>
+            <div style={{ maxWidth: 260 }}>
               <img
                 src={msg.fileUrl}
                 alt={msg.content}
-                className="w-full object-cover rounded-[10px]"
+                className="w-full object-cover block"
                 style={{ maxHeight: 300 }}
               />
               {msg.fileUrl && (
@@ -886,8 +887,8 @@ function MessageBubble({
           ) : (
             /* ── Generic file ─────────────────────── */
             <div className={cn(
-              "flex items-center gap-3 p-2.5 rounded-[12px] border",
-              isMe ? "bg-white/10 border-white/15 text-white" : "bg-[#fafafa] border-[#ebebeb] text-[#171717]"
+              "flex items-center gap-3 p-2.5",
+              isMe ? "text-white" : "text-[#171717]"
             )}>
               <div className={cn(
                 "h-9 w-9 rounded-[4px] border flex items-center justify-center shrink-0",
@@ -918,34 +919,60 @@ function MessageBubble({
               )}
             </div>
           )}
+        </div>
 
-          {/* Emoji reaction trigger — appears on hover */}
+        {/* Reactions row */}
+        {hasReactions && (
+          <div className={cn("flex flex-wrap gap-1 mt-1.5 px-1", isMe ? "justify-end" : "justify-start")}>
+            {Object.entries(msgReactions).map(([emoji, count]) => (
+              count > 0 && (
+                <button
+                  key={emoji}
+                  onClick={() => onReact?.(emoji)}
+                  className="flex items-center gap-0.5 px-1.5 py-0.5 bg-white border border-[#ebebeb] rounded-full text-xs hover:border-[#171717] transition-colors cursor-pointer shadow-sm"
+                  title={`React ${emoji}`}
+                >
+                  <span>{emoji}</span>
+                  <span className="font-mono text-[10px] text-[#4d4d4d]">{count}</span>
+                </button>
+              )
+            ))}
+          </div>
+        )}
+
+        {/* Timestamp + reaction trigger row */}
+        <div className={cn(
+          "flex items-center gap-1.5 mt-1.5 px-1",
+          isMe ? "flex-row-reverse" : "flex-row"
+        )}>
+          <span className="font-mono text-[10px] text-[#8f8f8f]">
+            {format(msg.timestamp, "HH:mm")}
+          </span>
+          {msg.type === "text" && copied && (
+            <span className="font-mono text-[10px] text-emerald-600 font-medium flex items-center gap-0.5">
+              <Check size={10} /> Copied!
+            </span>
+          )}
+          {/* Emoji trigger — inline with timestamp */}
           {onReact && (
-            <div
-              className={cn(
-                "absolute -bottom-3 flex items-center",
-                isMe ? "left-1" : "right-1"
-              )}
-              ref={pickerRef}
-            >
+            <div className="relative" ref={pickerRef}>
               <button
                 onClick={() => setShowPicker((v) => !v)}
                 className={cn(
-                  "p-1 rounded-full border transition-all cursor-pointer shadow-sm",
+                  "p-0.5 rounded-full border transition-all cursor-pointer",
                   "bg-white border-[#ebebeb] text-[#8f8f8f] hover:text-[#171717] hover:border-[#171717]",
-                  "opacity-0 group-hover:opacity-100 max-sm:opacity-60",
-                  showPicker && "opacity-100"
+                  "opacity-0 group-hover:opacity-100 max-sm:opacity-50",
+                  showPicker && "opacity-100 border-[#171717] text-[#171717]"
                 )}
-                title="React"
+                title="Add reaction"
               >
-                <Smile size={11} />
+                <Smile size={10} />
               </button>
-
               {showPicker && (
                 <div
                   className={cn(
-                    "reaction-picker absolute bottom-7 bg-white border border-[#ebebeb] rounded-full shadow-lg px-2 py-1.5 flex items-center gap-1 z-20",
-                    isMe ? "right-0" : "left-0"
+                    "reaction-picker absolute z-20 bg-white border border-[#ebebeb] rounded-full shadow-lg px-2 py-1.5 flex items-center gap-1",
+                    isMe ? "bottom-6 right-0" : "bottom-6 left-0"
                   )}
                 >
                   {EMOJI_LIST.map((emoji) => (
@@ -964,37 +991,6 @@ function MessageBubble({
                 </div>
               )}
             </div>
-          )}
-        </div>
-
-        {/* Reactions row */}
-        {hasReactions && (
-          <div className={cn("flex flex-wrap gap-1 mt-4 px-1", isMe ? "justify-end" : "justify-start")}>
-            {Object.entries(msgReactions).map(([emoji, count]) => (
-              count > 0 && (
-                <button
-                  key={emoji}
-                  onClick={() => onReact?.(emoji)}
-                  className="flex items-center gap-0.5 px-1.5 py-0.5 bg-white border border-[#ebebeb] rounded-full text-xs hover:border-[#171717] transition-colors cursor-pointer shadow-sm"
-                  title={`React ${emoji}`}
-                >
-                  <span>{emoji}</span>
-                  <span className="font-mono text-[10px] text-[#4d4d4d]">{count}</span>
-                </button>
-              )
-            ))}
-          </div>
-        )}
-
-        {/* Timestamp */}
-        <div className="flex items-center gap-2 mt-1.5 px-1">
-          <span className="font-mono text-[10px] text-[#8f8f8f]">
-            {format(msg.timestamp, "HH:mm")}
-          </span>
-          {msg.type === "text" && copied && (
-            <span className="font-mono text-[10px] text-emerald-600 font-medium flex items-center gap-0.5">
-              <Check size={10} /> Copied!
-            </span>
           )}
         </div>
       </div>
