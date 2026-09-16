@@ -98,6 +98,10 @@ function ChatApp() {
 
   const [roomId, setRoomId] = useState<string | null>(() => new URLSearchParams(window.location.search).get("room")?.trim() || null);
   const [guestInvite, setGuestInvite] = useState<string | null>(() => new URLSearchParams(window.location.search).get("invite")?.trim() || null);
+  const [guestLobby, setGuestLobby] = useState(false);
+  const [fallbackNickname] = useState(() => `Peer-${uuidv4().slice(0, 4).toUpperCase()}`);
+  const guestRoomRef = useRef(!!roomId && !!guestInvite);
+  guestRoomRef.current = !!roomId && !!guestInvite;
   const [joinInput, setJoinInput] = useState("");
   const [joinError, setJoinError] = useState("");
   const [showScanner, setShowScanner] = useState(false);
@@ -105,6 +109,31 @@ function ChatApp() {
   const [nickname, setNickname] = useState(() => {
     return localStorage.getItem("chatp2p_nickname") || "";
   });
+
+  useEffect(() => {
+    // A direct room link needs an in-app lobby entry so the first Back stays in the app.
+    const current = new URL(window.location.href);
+    if (current.searchParams.has("room") && !window.history.state?.chatp2pRoom) {
+      const lobby = new URL(current);
+      lobby.searchParams.delete("room");
+      lobby.searchParams.delete("invite");
+      lobby.searchParams.delete("pwd");
+      window.history.replaceState({ chatp2pLobby: true }, "", lobby);
+      window.history.pushState({ chatp2pRoom: true }, "", current);
+    }
+
+    const syncFromUrl = () => {
+      const params = new URLSearchParams(window.location.search);
+      const nextRoom = params.get("room")?.trim() || null;
+      const nextInvite = params.get("invite")?.trim() || null;
+      if (!nextRoom) setGuestLobby((wasGuestLobby) => wasGuestLobby || guestRoomRef.current);
+      setRoomId(nextRoom);
+      setGuestInvite(nextInvite);
+      setShowScanner(false);
+    };
+    window.addEventListener("popstate", syncFromUrl);
+    return () => window.removeEventListener("popstate", syncFromUrl);
+  }, []);
 
   useEffect(() => {
     const params = new URLSearchParams(window.location.search);
@@ -120,6 +149,7 @@ function ChatApp() {
         localStorage.setItem(STORAGE_KEY, candidate);
         setPassword(candidate);
         setGuestInvite(null);
+        setGuestLobby(false);
         if (params.has("pwd")) {
           const url = new URL(window.location.href);
           url.searchParams.delete("pwd");
@@ -143,6 +173,7 @@ function ChatApp() {
       if (await verifyOwnerPassword(passwordInput.trim())) {
         localStorage.setItem(STORAGE_KEY, passwordInput.trim());
         setPassword(passwordInput.trim());
+        setGuestLobby(false);
         setPasswordError("");
       } else {
         setPasswordError("Invalid password. Access denied.");
@@ -169,19 +200,27 @@ function ChatApp() {
   };
 
   const handleCreateRoom = () => {
+    if (!password) {
+      setGuestLobby(false);
+      return;
+    }
     const newRoom = uuidv4().slice(0, 8);
-    window.history.pushState({}, "", `?room=${newRoom}`);
+    window.history.pushState({ chatp2pRoom: true }, "", `?room=${newRoom}`);
     setGuestInvite(null);
     setRoomId(newRoom);
   };
 
   const handleJoinRoom = (overrideId?: string) => {
+    if (!password) {
+      setJoinError("Unlock the app or scan an invitation QR code to join a room.");
+      return;
+    }
     const raw = (overrideId ?? joinInput).trim().toLowerCase().replace(/[^a-z0-9-]/g, "");
     if (!raw) {
       setJoinError("Enter a valid Room ID.");
       return;
     }
-    window.history.pushState({}, "", `?room=${raw}`);
+    window.history.pushState({ chatp2pRoom: true }, "", `?room=${raw}`);
     setGuestInvite(null);
     setRoomId(raw);
   };
@@ -190,10 +229,36 @@ function ChatApp() {
     if (e.key === "Enter") handleJoinRoom();
   };
 
-  const handleQRScan = (scannedId: string) => {
+  const handleQRScan = (scanned: { roomId: string; invite?: string }) => {
     setShowScanner(false);
-    setJoinInput(scannedId);
-    handleJoinRoom(scannedId);
+    setJoinInput(scanned.roomId);
+    if (scanned.invite) {
+      const url = new URL(window.location.href);
+      url.searchParams.set("room", scanned.roomId);
+      url.searchParams.set("invite", scanned.invite);
+      url.searchParams.delete("pwd");
+      window.history.pushState({ chatp2pRoom: true }, "", url);
+      setGuestInvite(scanned.invite);
+      setRoomId(scanned.roomId);
+      setGuestLobby(false);
+    } else {
+      handleJoinRoom(scanned.roomId);
+    }
+  };
+
+  const handleLeaveRoom = () => {
+    if (window.history.state?.chatp2pRoom) {
+      window.history.back();
+      return;
+    }
+    const url = new URL(window.location.href);
+    url.searchParams.delete("room");
+    url.searchParams.delete("invite");
+    url.searchParams.delete("pwd");
+    window.history.replaceState({ chatp2pLobby: true }, "", url);
+    setGuestLobby(!!guestInvite && !password);
+    setGuestInvite(null);
+    setRoomId(null);
   };
 
   if (guestInvite && checkingPassword && !password) {
@@ -201,7 +266,7 @@ function ChatApp() {
   }
 
   // ── 1. Password Gate ─────────────────────────────────────────
-  if (!guestInvite && !password) {
+  if (!guestInvite && !password && !guestLobby) {
     return (
       <div className="relative h-[100dvh] max-h-[100dvh] w-screen bg-[#fafafa] text-[#171717] font-sans flex items-center justify-center p-4 overflow-hidden">
         <div className="vercel-mesh-glow" />
@@ -288,15 +353,15 @@ function ChatApp() {
           <div className="flex justify-between items-center pb-3 border-b border-[#ebebeb]">
             <div className="flex items-center gap-1.5 font-mono text-[11px] text-[#171717] bg-[#fafafa] border border-[#ebebeb] px-2.5 py-0.5 rounded-full">
               <span className="w-1.5 h-1.5 rounded-full bg-emerald-500" />
-              <span>UNLOCKED</span>
+              <span>{password ? "UNLOCKED" : "GUEST"}</span>
             </div>
             <button
-              onClick={handleLock}
+              onClick={password ? handleLock : () => setGuestLobby(false)}
               className="font-mono text-xs text-[#8f8f8f] hover:text-[#171717] px-2 py-1 rounded-[6px] border border-[#ebebeb] hover:border-[#171717] transition-colors cursor-pointer flex items-center gap-1"
-              title="Lock session"
+              title={password ? "Lock session" : "Unlock app"}
             >
               <LogOut size={12} />
-              <span>LOCK</span>
+              <span>{password ? "LOCK" : "UNLOCK"}</span>
             </button>
           </div>
 
@@ -341,7 +406,7 @@ function ChatApp() {
             onClick={handleCreateRoom}
             className="w-full bg-[#171717] hover:bg-black text-white rounded-full py-2.5 px-4 text-sm font-medium transition-colors cursor-pointer flex items-center justify-center gap-2 shadow-sm"
           >
-            <span>+ Start New Chat</span>
+            <span>{password ? "+ Start New Chat" : "Unlock to Start New Chat"}</span>
           </button>
 
           {/* Divider */}
@@ -393,7 +458,7 @@ function ChatApp() {
 
           {/* Footer note */}
           <p className="text-center font-mono text-[10px] text-[#8f8f8f] tracking-wide">
-            SHARE YOUR ROOM ID WITH A PEER TO CONNECT
+            {password ? "SHARE YOUR ROOM ID WITH A PEER TO CONNECT" : "SCAN AN INVITATION QR TO REJOIN A ROOM"}
           </p>
         </div>
       </div>
@@ -401,7 +466,7 @@ function ChatApp() {
   }
 
   // ── 3. Unlocked: Chat Room ───────────────────────────────────
-  return <ChatRoom roomId={roomId} nickname={nickname || `Peer-${uuidv4().slice(0, 4).toUpperCase()}`} password={guestInvite ? undefined : password} invite={guestInvite || undefined} onLock={handleLock} onLeave={() => { window.history.pushState({}, "", window.location.pathname); setGuestInvite(null); setRoomId(null); }} />;
+  return <ChatRoom roomId={roomId} nickname={nickname || fallbackNickname} password={guestInvite ? undefined : password} invite={guestInvite || undefined} onLeave={handleLeaveRoom} />;
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -413,14 +478,12 @@ function ChatRoom({
   nickname,
   password,
   invite,
-  onLock,
   onLeave,
 }: {
   roomId: string;
   nickname: string;
   password?: string;
   invite?: string;
-  onLock: () => void;
   onLeave: () => void;
 }) {
   const {
@@ -661,16 +724,17 @@ function ChatRoom({
         )}
 
         {/* Header */}
-        <header className="h-14 border-b border-[#ebebeb] flex items-center justify-between px-3 sm:px-6 bg-white shrink-0 z-10">
-          <div className="flex items-center gap-2 sm:gap-4 min-w-0">
-            <VercelTriangle className="w-4 h-4 text-[#171717] shrink-0" />
-            <div className="flex items-center gap-2.5 min-w-0">
-              <span className="font-mono text-xs sm:text-sm font-medium text-[#171717] truncate">
-                <span className="hidden min-[390px]:inline">room: </span><span className="text-[#8f8f8f]">{roomId}</span>
-              </span>
+        <header className="border-b border-[#ebebeb] flex flex-col sm:flex-row sm:items-center sm:justify-between px-3 sm:px-6 bg-white shrink-0 z-10">
+          <div className="flex h-12 sm:h-14 w-full sm:w-auto items-center justify-between sm:justify-start gap-2 sm:gap-4 min-w-0">
+            <div className="flex items-center gap-2 sm:gap-4 min-w-0">
+              <VercelTriangle className="w-4 h-4 text-[#171717] shrink-0" />
+              <div className="flex items-center gap-2.5 min-w-0">
+                <span className="font-mono text-xs sm:text-sm font-medium text-[#171717] truncate">
+                  <span className="hidden min-[390px]:inline">room: </span><span className="text-[#8f8f8f]">{roomId}</span>
+                </span>
 
-              {/* Status dot (mobile) — full pill on sm+ */}
-              <div className="flex items-center shrink-0">
+                {/* Status dot (mobile) — full pill on sm+ */}
+                <div className="flex items-center shrink-0">
                 {/* Mobile: small colored dot only */}
                 <span className={cn(
                   "sm:hidden w-2 h-2 rounded-full",
@@ -710,11 +774,21 @@ function ChatRoom({
                     INVITE INVALID
                   </span>
                 )}
+                </div>
               </div>
             </div>
+            <button
+              type="button"
+              onClick={onLeave}
+              title="Leave room and return to chat setup"
+              aria-label="Leave room"
+              className="sm:hidden inline-flex shrink-0 items-center gap-1.5 rounded-[6px] border border-[#ebebeb] px-2.5 py-1.5 font-mono text-[11px] text-[#4d4d4d] hover:border-rose-300 hover:text-rose-600"
+            >
+              <LogOut size={13} /> Leave room
+            </button>
           </div>
 
-          <div className="flex items-center gap-1 sm:gap-2 shrink-0">
+          <div className="flex h-10 sm:h-auto w-full sm:w-auto items-center justify-end gap-1 sm:gap-2 overflow-x-auto sm:overflow-visible shrink-0">
             <span className="hidden md:inline-flex items-center font-mono text-[10px] text-[#8f8f8f] px-2 py-1 rounded-[6px] border border-[#ebebeb] bg-[#fafafa]">
               CLOUDFLARE EDGE
             </span>
@@ -808,12 +882,12 @@ function ChatRoom({
             )}
 
             <button
-              onClick={password ? onLock : onLeave}
-              title={password ? "Lock session" : "Leave room"}
-              className="font-mono text-xs text-[#8f8f8f] hover:text-rose-600 px-2 py-1 rounded-[6px] border border-[#ebebeb] hover:border-rose-300 transition-colors flex items-center gap-1 cursor-pointer"
+              onClick={onLeave}
+              title="Leave room and return to chat setup"
+              className="hidden sm:inline-flex font-mono text-xs text-[#8f8f8f] hover:text-rose-600 px-2 py-1 rounded-[6px] border border-[#ebebeb] hover:border-rose-300 transition-colors items-center gap-1 cursor-pointer"
             >
               <LogOut size={12} />
-              <span className="hidden sm:inline">{password ? "Lock" : "Leave"}</span>
+              <span>Leave room</span>
             </button>
           </div>
         </header>

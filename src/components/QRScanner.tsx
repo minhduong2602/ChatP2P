@@ -3,7 +3,7 @@ import jsQR from "jsqr";
 import { X, Camera } from "lucide-react";
 
 interface QRScannerProps {
-  onScan: (roomId: string) => void;
+  onScan: (room: { roomId: string; invite?: string }) => void;
   onClose: () => void;
 }
 
@@ -80,7 +80,10 @@ export function QRScanner({ onScan, onClose }: QRScannerProps) {
         const roomId = url.searchParams.get("room");
         if (roomId) {
           stopCamera();
-          onScan(roomId.trim().toLowerCase().replace(/[^a-z0-9-]/g, ""));
+          onScan({
+            roomId: roomId.trim().toLowerCase().replace(/[^a-z0-9-]/g, ""),
+            invite: url.searchParams.get("invite")?.trim() || undefined,
+          });
           return;
         }
       } catch {
@@ -88,7 +91,7 @@ export function QRScanner({ onScan, onClose }: QRScannerProps) {
         const raw = code.data.trim().toLowerCase().replace(/[^a-z0-9-]/g, "");
         if (raw.length >= 4) {
           stopCamera();
-          onScan(raw);
+          onScan({ roomId: raw });
           return;
         }
       }
