@@ -99,8 +99,19 @@ describe("room invite authorization", () => {
     first.connections.push(oldGuest);
     await firstServer.onConnect(oldGuest as unknown as Party.Connection);
     assert.equal(oldGuest.closedCode, 4001);
-    firstServer.onMessage(JSON.stringify({ type: "chat-text", content: "still here" }), guest as unknown as Party.Connection);
-    assert.match(owner.received.at(-1) || "", /still here/);
+    firstServer.onMessage(JSON.stringify({
+      type: "chat-text",
+      content: "still here",
+      replyTo: { messageId: "original", senderName: "Owner", type: "text", content: "hello" },
+    }), guest as unknown as Party.Connection);
+    const relayedReply = JSON.parse(owner.received.at(-1) || "{}");
+    assert.equal(relayedReply.content, "still here");
+    assert.deepEqual(relayedReply.replyTo, {
+      messageId: "original",
+      senderName: "Owner",
+      type: "text",
+      content: "hello",
+    });
     firstServer.onMessage(JSON.stringify({ type: "chat-text", content: "blocked" }), oldGuest as unknown as Party.Connection);
     assert.doesNotMatch(owner.received.at(-1) || "", /blocked/);
 

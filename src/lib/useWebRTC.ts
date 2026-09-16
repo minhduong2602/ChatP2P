@@ -14,6 +14,14 @@ export type Message = {
   fileType?: string;
   fileSize?: number;
   timestamp: number;
+  replyTo?: ReplyReference;
+};
+
+export type ReplyReference = {
+  messageId: string;
+  senderName: string;
+  type: "text" | "file";
+  content: string;
 };
 
 export type ConnectionStatus =
@@ -210,6 +218,20 @@ export function useWebRTC(roomId: string | null, nickname: string, credential: {
         // ── Text message relay ─────────────────────────────────
         case "chat-text": {
           const senderId = data.senderId as string;
+          const rawReply = data.replyTo as Partial<ReplyReference> | undefined;
+          const replyTo =
+            rawReply &&
+            typeof rawReply.messageId === "string" &&
+            typeof rawReply.senderName === "string" &&
+            (rawReply.type === "text" || rawReply.type === "file") &&
+            typeof rawReply.content === "string"
+              ? {
+                  messageId: rawReply.messageId.slice(0, 100),
+                  senderName: rawReply.senderName.slice(0, 80),
+                  type: rawReply.type,
+                  content: rawReply.content.slice(0, 500),
+                }
+              : undefined;
           addMessage({
             id: (data.id as string) || uuidv4(),
             senderId,
@@ -218,6 +240,7 @@ export function useWebRTC(roomId: string | null, nickname: string, credential: {
             type: "text",
             content: data.content as string,
             timestamp: (data.timestamp as number) || Date.now(),
+            replyTo,
           });
           break;
         }
@@ -349,10 +372,10 @@ export function useWebRTC(roomId: string | null, nickname: string, credential: {
 
   // ── sendMessage ──────────────────────────────────────────────
   const sendMessage = useCallback(
-    (text: string) => {
+    (text: string, replyTo?: ReplyReference) => {
       if (status !== "connected") return;
       const id = uuidv4();
-      sendRelayRef.current({ type: "chat-text", id, content: text, timestamp: Date.now() });
+      sendRelayRef.current({ type: "chat-text", id, content: text, timestamp: Date.now(), replyTo });
       addMessage({
         id,
         senderId: myPeerIdRef.current,
@@ -361,6 +384,7 @@ export function useWebRTC(roomId: string | null, nickname: string, credential: {
         type: "text",
         content: text,
         timestamp: Date.now(),
+        replyTo,
       });
     },
     [status, nickname, addMessage]

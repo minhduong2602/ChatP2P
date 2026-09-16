@@ -20,9 +20,10 @@ import {
   Smile,
   X,
   MonitorDown,
+  Reply as ReplyIcon,
 } from "lucide-react";
 import { QRCodeSVG } from "qrcode.react";
-import { useWebRTC, type Message, type FileProgress } from "./lib/useWebRTC";
+import { useWebRTC, type Message, type FileProgress, type ReplyReference } from "./lib/useWebRTC";
 import { cn } from "./lib/utils";
 import { format } from "date-fns";
 import { QRScanner } from "./components/QRScanner";
@@ -278,16 +279,16 @@ export default function App() {
           {/* Header */}
           <div className="text-center space-y-2.5">
             <span className="font-mono text-[11px] font-medium tracking-wider text-[#8f8f8f] uppercase block">
-              WEBRTC // ZERO-LOG RELAY
+              SECURE ROOM // EPHEMERAL RELAY
             </span>
             <div className="w-10 h-10 rounded-[6px] border border-[#ebebeb] bg-[#fafafa] flex items-center justify-center mx-auto text-[#171717] my-2">
               <VercelTriangle className="w-5 h-5 text-[#171717]" />
             </div>
             <h1 className="text-2xl font-semibold tracking-[-0.04em] text-[#171717]">
-              Secure P2P Chat
+              Secure Room Chat
             </h1>
             <p className="text-sm text-[#4d4d4d] leading-relaxed max-w-xs mx-auto">
-              Direct peer-to-peer data tunnel with end-to-end encryption. Zero server message logging.
+              Encrypted in transit through a temporary room relay. No server-side message history.
             </p>
           </div>
 
@@ -299,6 +300,7 @@ export default function App() {
             <input
               type="text"
               value={nickname}
+              maxLength={40}
               onChange={(e) => {
                 const val = e.target.value;
                 setNickname(val);
@@ -416,8 +418,12 @@ function ChatRoom({
   const { notify } = useNotification();
 
   const [text, setText] = useState("");
+  const [replyingTo, setReplyingTo] = useState<Message | null>(null);
+  const [highlightedMessageId, setHighlightedMessageId] = useState<string | null>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
+  const textInputRef = useRef<HTMLInputElement>(null);
   const scrollRef = useRef<HTMLDivElement>(null);
+  const highlightTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const [copied, setCopied] = useState(false);
   const [inviteToken, setInviteToken] = useState<string | null>(invite || null);
   const [inviteError, setInviteError] = useState("");
@@ -518,10 +524,39 @@ function ChatRoom({
   const handleSend = (e: React.FormEvent) => {
     e.preventDefault();
     if (text.trim() && status === "connected") {
-      sendMessage(text.trim());
+      const replyTo: ReplyReference | undefined = replyingTo
+        ? {
+            messageId: replyingTo.id,
+            senderName: (replyingTo.senderName || "Unknown").slice(0, 80),
+            type: replyingTo.type,
+            content: replyingTo.content.slice(0, 500),
+          }
+        : undefined;
+      sendMessage(text.trim(), replyTo);
       setText("");
+      setReplyingTo(null);
     }
   };
+
+  const handleReply = (message: Message) => {
+    setReplyingTo(message);
+    requestAnimationFrame(() => textInputRef.current?.focus());
+  };
+
+  const scrollToMessage = (messageId: string) => {
+    const target = document.getElementById(`message-${messageId}`);
+    if (!target) return;
+    target.scrollIntoView({ behavior: "smooth", block: "center" });
+    setHighlightedMessageId(messageId);
+    if (highlightTimerRef.current) clearTimeout(highlightTimerRef.current);
+    highlightTimerRef.current = setTimeout(() => setHighlightedMessageId(null), 1600);
+  };
+
+  useEffect(() => {
+    return () => {
+      if (highlightTimerRef.current) clearTimeout(highlightTimerRef.current);
+    };
+  }, []);
 
   const handleTextChange = (e: React.ChangeEvent<HTMLInputElement>) => {
     setText(e.target.value);
@@ -596,12 +631,12 @@ function ChatRoom({
         )}
 
         {/* Header */}
-        <header className="h-14 border-b border-[#ebebeb] flex items-center justify-between px-4 sm:px-6 bg-white shrink-0 z-10">
-          <div className="flex items-center gap-3 sm:gap-4 min-w-0">
+        <header className="h-14 border-b border-[#ebebeb] flex items-center justify-between px-3 sm:px-6 bg-white shrink-0 z-10">
+          <div className="flex items-center gap-2 sm:gap-4 min-w-0">
             <VercelTriangle className="w-4 h-4 text-[#171717] shrink-0" />
             <div className="flex items-center gap-2.5 min-w-0">
-              <span className="font-mono text-xs sm:text-sm font-medium text-[#171717] shrink-0">
-                room: <span className="text-[#8f8f8f]">{roomId}</span>
+              <span className="font-mono text-xs sm:text-sm font-medium text-[#171717] truncate">
+                <span className="hidden min-[390px]:inline">room: </span><span className="text-[#8f8f8f]">{roomId}</span>
               </span>
 
               {/* Status dot (mobile) — full pill on sm+ */}
@@ -649,7 +684,7 @@ function ChatRoom({
             </div>
           </div>
 
-          <div className="flex items-center gap-1.5 sm:gap-2 shrink-0">
+          <div className="flex items-center gap-1 sm:gap-2 shrink-0">
             <span className="hidden md:inline-flex items-center font-mono text-[10px] text-[#8f8f8f] px-2 py-1 rounded-[6px] border border-[#ebebeb] bg-[#fafafa]">
               CLOUDFLARE EDGE
             </span>
@@ -684,7 +719,7 @@ function ChatRoom({
                   <div className="flex items-center gap-1">
                     <span className="font-mono text-[10px] text-[#8f8f8f] hidden sm:inline">Clear?</span>
                     <button
-                      onClick={() => { clearMessages(); setShowClearConfirm(false); }}
+                      onClick={() => { clearMessages(); setReplyingTo(null); setShowClearConfirm(false); }}
                       className="font-mono text-[10px] text-rose-600 hover:text-rose-700 px-2 py-1 rounded-[6px] border border-rose-200 hover:border-rose-300 transition-colors cursor-pointer"
                     >
                       Yes
@@ -717,7 +752,7 @@ function ChatRoom({
                   className="font-mono text-xs text-[#171717] px-2.5 py-1 rounded-[6px] border border-[#ebebeb] hover:border-[#171717] transition-colors flex items-center gap-1.5 cursor-pointer disabled:opacity-50"
                 >
                   {copied ? <Check size={12} className="text-emerald-600" /> : <LinkIcon size={12} />}
-                  <span>{copied ? "Copied" : inviteBusy ? "Preparing..." : "Copy Link"}</span>
+                  <span className="hidden sm:inline">{copied ? "Copied" : inviteBusy ? "Preparing..." : "Copy Link"}</span>
                 </button>
                 <button
                   onClick={handleRotateInvite}
@@ -841,7 +876,10 @@ function ChatRoom({
                   msg={msg}
                   msgReactions={reactions[msgId]}
                   onReact={(emoji) => sendReaction(msgId, emoji)}
+                  onReply={() => handleReply(msg)}
+                  onJumpToReply={scrollToMessage}
                   showAvatar={showAvatar}
+                  highlighted={highlightedMessageId === msgId}
                 />
               );
             })}
@@ -875,6 +913,27 @@ function ChatRoom({
 
         {/* Input Area */}
         <footer className="p-3 sm:p-4 bg-white border-t border-[#ebebeb] shrink-0">
+          {replyingTo && (
+            <div className="mb-2 flex items-center gap-3 rounded-[8px] border border-[#ebebeb] bg-[#fafafa] px-3 py-2">
+              <div className="min-w-0 flex-1 border-l-2 border-[#171717] pl-3">
+                <p className="font-mono text-[10px] font-semibold uppercase tracking-wide text-[#171717]">
+                  Replying to {replyingTo.senderName || "Unknown"}
+                </p>
+                <p className="mt-0.5 truncate text-xs text-[#6b6b6b]">
+                  {replyingTo.type === "file" ? "📎 " : ""}{replyingTo.content}
+                </p>
+              </div>
+              <button
+                type="button"
+                onClick={() => setReplyingTo(null)}
+                aria-label="Cancel reply"
+                title="Cancel reply"
+                className="shrink-0 rounded-[6px] p-1.5 text-[#8f8f8f] hover:bg-[#ebebeb] hover:text-[#171717]"
+              >
+                <X size={14} />
+              </button>
+            </div>
+          )}
           <form
             onSubmit={handleSend}
             className="flex items-center gap-2 rounded-[8px] border border-[#ebebeb] bg-white p-1.5 focus-within:border-[#171717] transition-colors"
@@ -897,12 +956,19 @@ function ChatRoom({
               <Paperclip size={18} />
             </button>
             <input
+              ref={textInputRef}
               type="text"
               value={text}
               onChange={handleTextChange}
+              onKeyDown={(event) => {
+                if (event.key === "Escape" && replyingTo) {
+                  event.preventDefault();
+                  setReplyingTo(null);
+                }
+              }}
               placeholder={
                 status === "connected"
-                  ? "Type an encrypted message..."
+                  ? "Type a message..."
                   : "Waiting for peer to connect..."
               }
               disabled={status !== "connected"}
@@ -935,7 +1001,7 @@ function ChatRoom({
             </span>
             {/* Desktop: security tagline */}
             <p className="hidden sm:block font-mono text-[10px] text-[#8f8f8f] tracking-wide">
-              DIRECT P2P // END-TO-END ENCRYPTED // ZERO LOGS
+              TLS PROTECTED // NO SERVER MESSAGE HISTORY
             </p>
           </div>
         </footer>
@@ -952,13 +1018,19 @@ function MessageBubble({
   msg,
   msgReactions,
   onReact,
+  onReply,
+  onJumpToReply,
   showAvatar = true,
+  highlighted = false,
 }: {
   key?: React.Key;
   msg: Message;
   msgReactions?: Record<string, number>;
   onReact?: (emoji: string) => void;
+  onReply?: () => void;
+  onJumpToReply?: (messageId: string) => void;
   showAvatar?: boolean;
+  highlighted?: boolean;
 }) {
   const isMe = msg.isMe;
   const [copied, setCopied] = useState(false);
@@ -989,8 +1061,10 @@ function MessageBubble({
 
   return (
     <div
+      id={`message-${msg.id}`}
       className={cn(
-        "flex w-full items-end gap-2.5",
+        "flex w-full items-end gap-2.5 rounded-[14px] transition-[background-color,box-shadow] duration-300",
+        highlighted && "bg-amber-50 shadow-[0_0_0_4px_rgba(245,158,11,0.12)]",
         isMe ? "justify-end msg-from-me" : "justify-start msg-from-peer"
       )}
     >
@@ -1019,7 +1093,7 @@ function MessageBubble({
         )}
       >
         {!isMe && showAvatar && msg.senderName && (
-          <span className="text-[10px] text-[#8f8f8f] font-mono uppercase tracking-wider mb-1 ml-1">
+          <span className="max-w-full truncate text-[10px] text-[#8f8f8f] font-mono uppercase tracking-wider mb-1 ml-1" title={msg.senderName}>
             {msg.senderName}
           </span>
         )}
@@ -1035,6 +1109,26 @@ function MessageBubble({
                 : "bg-white border border-[#ebebeb] text-[#171717] rounded-bl-[2px] shadow-[0_1px_2px_rgba(0,0,0,0.02)]"
             )}
           >
+            {msg.replyTo && (
+              <button
+                type="button"
+                onClick={() => onJumpToReply?.(msg.replyTo!.messageId)}
+                className={cn(
+                  "mx-2.5 mt-2.5 block w-[calc(100%-1.25rem)] min-w-0 rounded-[7px] border-l-2 px-2.5 py-2 text-left transition-colors",
+                  isMe
+                    ? "border-white/70 bg-white/10 hover:bg-white/15"
+                    : "border-[#171717] bg-[#f7f7f7] hover:bg-[#f2f2f2]"
+                )}
+                title="Jump to original message"
+              >
+                <span className={cn("block truncate font-mono text-[10px] font-semibold uppercase tracking-wide", isMe ? "text-white/80" : "text-[#4d4d4d]")}>
+                  {msg.replyTo.senderName}
+                </span>
+                <span className={cn("mt-0.5 block truncate text-xs", isMe ? "text-white/65" : "text-[#737373]")}>
+                  {msg.replyTo.type === "file" ? "📎 " : ""}{msg.replyTo.content}
+                </span>
+              </button>
+            )}
             {msg.type === "text" ? (
               /* ── Text message ─────────────────────── */
               <div className="flex items-start gap-2 p-3 sm:p-3.5">
@@ -1123,26 +1217,44 @@ function MessageBubble({
             )}
           </div>
 
-          {/* 😊 Reaction trigger — hidden until hover, absolute at bottom corner */}
-          {onReact && (
+          {/* Message actions */}
+          {(onReply || onReact) && (
             <div
-              className={cn("absolute bottom-1 z-10", isMe ? "left-1" : "right-1")}
+              className={cn(
+                "absolute bottom-1 z-10 flex items-center gap-1 transition-opacity",
+                "opacity-100 sm:opacity-0 sm:group-hover:opacity-100 sm:group-focus-within:opacity-100",
+                isMe ? "left-1" : "right-1"
+              )}
               ref={pickerRef}
             >
-              <button
-                onClick={() => setShowPicker((v) => !v)}
-                className={cn(
-                  "p-1 rounded-full border transition-all cursor-pointer select-none text-sm leading-none shadow-sm",
-                  "opacity-0 group-hover:opacity-100 max-sm:opacity-50 transition-opacity",
-                  showPicker
-                    ? "!opacity-100 bg-[#f5f5f5] border-[#171717]"
-                    : "bg-white border-[#d0d0d0] hover:border-[#171717] hover:bg-[#f5f5f5]"
-                )}
-                title="Add reaction"
-              >
-                😊
-              </button>
-              {showPicker && (
+              {onReply && (
+                <button
+                  type="button"
+                  onClick={onReply}
+                  className="rounded-full border border-[#d0d0d0] bg-white p-1.5 text-[#6b6b6b] shadow-sm hover:border-[#171717] hover:text-[#171717]"
+                  aria-label="Reply to message"
+                  title="Reply"
+                >
+                  <ReplyIcon size={13} />
+                </button>
+              )}
+              {onReact && (
+                <button
+                  type="button"
+                  onClick={() => setShowPicker((v) => !v)}
+                  className={cn(
+                    "rounded-full border p-1 text-sm leading-none shadow-sm transition-colors",
+                    showPicker
+                      ? "border-[#171717] bg-[#f5f5f5]"
+                      : "border-[#d0d0d0] bg-white hover:border-[#171717] hover:bg-[#f5f5f5]"
+                  )}
+                  aria-label="Add reaction"
+                  title="Add reaction"
+                >
+                  😊
+                </button>
+              )}
+              {onReact && showPicker && (
                 <div
                   className={cn(
                     "reaction-picker absolute z-20 bg-white border border-[#ebebeb] rounded-full shadow-lg px-2 py-1.5 flex items-center gap-1",
@@ -1151,6 +1263,7 @@ function MessageBubble({
                 >
                   {EMOJI_LIST.map((emoji) => (
                     <button
+                      type="button"
                       key={emoji}
                       onClick={() => {
                         onReact(emoji);
