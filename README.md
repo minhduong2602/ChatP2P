@@ -13,6 +13,6 @@ Use `npx partykit env add APP_PASSWORD` and `npx partykit env add APP_URL` for d
 
 ## Share a room
 
-The owner starts or joins a room, then uses **Copy Link** or its QR code. The URL contains `room` and a room-specific `invite` token; guests open it to enter the room directly. **New Link** replaces the token and blocks future joins with the old URL. People already connected can keep chatting. Earlier `room&pwd` links still work, but they contain the owner password and grant owner access.
+The owner starts or joins a room, then uses **Copy Link**, its QR code, or the URL in the browser address bar once the link is ready. The URL contains `room` and a room-specific `invite` token; guests open it to enter the room directly. **New Link** replaces the token and blocks future joins with the old URL. People already connected can keep chatting. Earlier `room&pwd` links still work, but they contain the owner password and grant owner access.
 
 Run `npm run lint`, `npm run build`, and `npx tsx --test tests/invite.test.ts` to verify the implementation.

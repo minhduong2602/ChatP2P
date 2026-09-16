@@ -62,7 +62,10 @@ function VercelTriangle({ className = "w-4 h-4 text-[#171717]" }: { className?: 
 
 export default function App() {
   const [password, setPassword] = useState("");
-  const [checkingPassword, setCheckingPassword] = useState(true);
+  const [checkingPassword, setCheckingPassword] = useState(() => {
+    const params = new URLSearchParams(window.location.search);
+    return !!(params.get("pwd")?.trim() || localStorage.getItem(STORAGE_KEY)?.trim());
+  });
 
   const [passwordInput, setPasswordInput] = useState("");
   const [passwordError, setPasswordError] = useState("");
@@ -80,10 +83,6 @@ export default function App() {
 
   useEffect(() => {
     const params = new URLSearchParams(window.location.search);
-    if (params.has("invite") && params.has("room")) {
-      setCheckingPassword(false);
-      return;
-    }
     const candidate = params.get("pwd")?.trim() || localStorage.getItem(STORAGE_KEY)?.trim();
     if (!candidate) {
       setCheckingPassword(false);
@@ -95,6 +94,7 @@ export default function App() {
       if (valid) {
         localStorage.setItem(STORAGE_KEY, candidate);
         setPassword(candidate);
+        setGuestInvite(null);
         if (params.has("pwd")) {
           const url = new URL(window.location.href);
           url.searchParams.delete("pwd");
@@ -136,8 +136,9 @@ export default function App() {
     setPasswordError("");
 
     const url = new URL(window.location.href);
-    if (url.searchParams.has("pwd")) {
+    if (url.searchParams.has("pwd") || url.searchParams.has("invite")) {
       url.searchParams.delete("pwd");
+      url.searchParams.delete("invite");
       window.history.replaceState({}, "", url.toString());
     }
   };
@@ -169,6 +170,10 @@ export default function App() {
     setJoinInput(scannedId);
     handleJoinRoom(scannedId);
   };
+
+  if (guestInvite && checkingPassword && !password) {
+    return <div className="h-[100dvh] w-screen bg-[#fafafa] text-[#4d4d4d] flex items-center justify-center text-sm">Checking access...</div>;
+  }
 
   // ── 1. Password Gate ─────────────────────────────────────────
   if (!guestInvite && !password) {
@@ -458,7 +463,15 @@ function ChatRoom({
     let cancelled = false;
     setInviteBusy(true);
     requestInvite(roomId, password, "get").then((token) => {
-      if (!cancelled) { setInviteToken(token); setInviteError(""); }
+      if (!cancelled) {
+        setInviteToken(token);
+        setInviteError("");
+        const url = new URL(window.location.href);
+        url.searchParams.set("room", roomId);
+        url.searchParams.set("invite", token);
+        url.searchParams.delete("pwd");
+        window.history.replaceState({}, "", url.toString());
+      }
     }).catch((error: Error) => {
       if (!cancelled) setInviteError(error.message);
     }).finally(() => {
@@ -489,6 +502,10 @@ function ChatRoom({
     try {
       const token = await requestInvite(roomId, password, "rotate");
       setInviteToken(token);
+      const url = new URL(window.location.href);
+      url.searchParams.set("room", roomId);
+      url.searchParams.set("invite", token);
+      window.history.replaceState({}, "", url.toString());
       setCopied(false);
       setInviteError("");
     } catch (error) {
