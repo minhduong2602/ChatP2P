@@ -38,6 +38,22 @@ function newInvite(): string {
   return Array.from(bytes, (byte) => byte.toString(16).padStart(2, "0")).join("");
 }
 
+function fileApiConfig(env: Record<string, unknown>): { url: string; secret: string } | null {
+  const url = typeof env.FILE_API_URL === "string" ? env.FILE_API_URL.trim().replace(/\/$/, "") : "";
+  const secret = typeof env.FILE_API_SECRET === "string" ? env.FILE_API_SECRET.trim() : "";
+  return url && secret ? { url, secret } : null;
+}
+
+function randomToken(): string {
+  const bytes = crypto.getRandomValues(new Uint8Array(32));
+  return Array.from(bytes, (byte) => byte.toString(16).padStart(2, "0")).join("");
+}
+
+async function sha256(value: string): Promise<string> {
+  const digest = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(value));
+  return Array.from(new Uint8Array(digest), (byte) => byte.toString(16).padStart(2, "0")).join("");
+}
+
 /** Relay for a room. Password authenticates owners; a room-bound invite authenticates guests. */
 export default class ChatSignalingServer implements Party.Server {
   constructor(readonly room: Party.Room) {}
@@ -111,9 +127,31 @@ export default class ChatSignalingServer implements Party.Server {
       conn.close(4000, "room-full");
       return;
     }
-    conn.setState({ authorized: true, owner });
+    const fileApi = fileApiConfig(this.room.env);
+    let fileSessionToken: string | undefined;
+    if (fileApi) {
+      const token = randomToken();
+      try {
+        const response = await fetch(`${fileApi.url}/internal/sessions`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json", "X-Internal-Secret": fileApi.secret },
+          body: JSON.stringify({
+            sessionId: conn.id,
+            tokenHash: await sha256(token),
+            roomId: this.room.id,
+            owner,
+            expiresAt: Date.now() + 24 * 60 * 60 * 1000,
+          }),
+        });
+        if (response.ok) fileSessionToken = token;
+        else console.error(`[PartyKit] File API rejected session registration (${response.status})`);
+      } catch (error) {
+        console.error("[PartyKit] File API session registration failed", error);
+      }
+    }
+    conn.setState({ authorized: true, owner, fileSession: !!fileSessionToken });
     const numClients = connections.length + 1;
-    conn.send(JSON.stringify({ type: "room-joined", numClients, peerId: conn.id }));
+    conn.send(JSON.stringify({ type: "room-joined", numClients, peerId: conn.id, fileSessionToken }));
     if (numClients >= 2) {
       for (const peer of connections) {
         if (peer.id !== conn.id) peer.send(JSON.stringify({ type: "peer-joined", peerId: conn.id }));
@@ -136,8 +174,19 @@ export default class ChatSignalingServer implements Party.Server {
     }
   }
 
-  onClose(conn: Party.Connection) {
+  async onClose(conn: Party.Connection) {
     if (!(conn.state as { authorized?: boolean } | null)?.authorized) return;
+    const fileApi = fileApiConfig(this.room.env);
+    if (fileApi && (conn.state as { fileSession?: boolean } | null)?.fileSession) {
+      try {
+        await fetch(`${fileApi.url}/internal/sessions/${encodeURIComponent(conn.id)}`, {
+          method: "DELETE",
+          headers: { "X-Internal-Secret": fileApi.secret },
+        });
+      } catch (error) {
+        console.error("[PartyKit] File API session revocation failed", error);
+      }
+    }
     for (const peer of this.room.getConnections()) {
       if (peer.id !== conn.id && (peer.state as { authorized?: boolean } | null)?.authorized) {
         peer.send(JSON.stringify({ type: "peer-disconnected", peerId: conn.id }));

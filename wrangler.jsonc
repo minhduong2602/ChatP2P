@@ -1,0 +1,26 @@
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "shun-chat-p2p-files",
+  "main": "worker/index.ts",
+  "compatibility_date": "2026-09-01",
+  "observability": { "enabled": true },
+  "triggers": { "crons": ["*/10 * * * *"] },
+  "vars": {
+    "APP_URL": "https://shun-chat-p2p.vercel.app"
+  },
+  "r2_buckets": [
+    {
+      "binding": "FILES",
+      "bucket_name": "chatp2p-files",
+      "preview_bucket_name": "chatp2p-files-preview"
+    }
+  ],
+  "d1_databases": [
+    {
+      "binding": "DB",
+      "database_name": "chatp2p-files",
+      "database_id": "c5d4a908-414e-4918-ba35-7dc7f5356d5e",
+      "migrations_dir": "migrations"
+    }
+  ]
+}

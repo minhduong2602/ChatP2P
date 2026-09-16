@@ -2,9 +2,13 @@ node_modules/
 build/
 dist/
 .partykit/
+.wrangler/
+.dev.vars
 coverage/
 .DS_Store
 *.log
 .env*
 !.env.example
 DESING-vercel.md
+
+.vercel

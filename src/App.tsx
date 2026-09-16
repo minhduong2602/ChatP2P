@@ -21,6 +21,12 @@ import {
   X,
   MonitorDown,
   Reply as ReplyIcon,
+  FolderOpen,
+  Database,
+  Clock3,
+  HardDrive,
+  ExternalLink,
+  AlertCircle,
 } from "lucide-react";
 import { QRCodeSVG } from "qrcode.react";
 import { useWebRTC, type Message, type FileProgress, type ReplyReference } from "./lib/useWebRTC";
@@ -29,6 +35,18 @@ import { format } from "date-fns";
 import { QRScanner } from "./components/QRScanner";
 import { useNotification } from "./lib/useNotification";
 import { requestInvite, verifyOwnerPassword } from "./lib/partyApi";
+import {
+  adminLogin,
+  createDownloadUrl,
+  deleteAdminFile,
+  deleteStoredFile,
+  fileStorageConfigured,
+  listAdminFiles,
+  listRoomFiles,
+  updateAdminFile,
+  updateStoredFile,
+  type StoredFile,
+} from "./lib/fileApi";
 
 const STORAGE_KEY = "chatp2p_auth_token";
 const EMOJI_LIST = ["👍", "❤️", "😂", "😮", "😢"];
@@ -37,7 +55,8 @@ const EMOJI_LIST = ["👍", "❤️", "😂", "😮", "😢"];
 function formatFileSize(bytes: number): string {
   if (bytes < 1024) return `${bytes} B`;
   if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
-  return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
+  if (bytes < 1024 * 1024 * 1024) return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
+  return `${(bytes / (1024 * 1024 * 1024)).toFixed(2)} GB`;
 }
 
 const AVATAR_COLORS = [
@@ -62,6 +81,11 @@ function VercelTriangle({ className = "w-4 h-4 text-[#171717]" }: { className?: 
 }
 
 export default function App() {
+  if (window.location.pathname === "/admin/storage") return <StorageAdminPage />;
+  return <ChatApp />;
+}
+
+function ChatApp() {
   const [password, setPassword] = useState("");
   const [checkingPassword, setCheckingPassword] = useState(() => {
     const params = new URLSearchParams(window.location.search);
@@ -413,6 +437,7 @@ function ChatRoom({
     transferProgress,
     typingPeers,
     reactions,
+    fileSessionToken,
   } = useWebRTC(roomId, nickname, { password, invite });
 
   const { notify } = useNotification();
@@ -431,6 +456,9 @@ function ChatRoom({
   const [isDragging, setIsDragging] = useState(false);
   const dragCounter = useRef(0);
   const [showClearConfirm, setShowClearConfirm] = useState(false);
+  const [showRoomFiles, setShowRoomFiles] = useState(false);
+  const [fileExpiryHours, setFileExpiryHours] = useState(24);
+  const [fileError, setFileError] = useState("");
   const prevMsgCount = useRef(messages.length);
 
   // PWA install prompt
@@ -567,7 +595,8 @@ function ChatRoom({
   const handleFileChange = (e: React.ChangeEvent<HTMLInputElement>) => {
     const files = Array.from(e.target.files ?? []);
     if (files.length > 0 && status === "connected") {
-      sendFiles(files);
+      setFileError("");
+      sendFiles(files, fileExpiryHours).catch((error) => setFileError(error instanceof Error ? error.message : "File upload failed"));
     }
     if (fileInputRef.current) fileInputRef.current.value = "";
   };
@@ -596,10 +625,11 @@ function ChatRoom({
       setIsDragging(false);
       const files = Array.from(e.dataTransfer.files);
       if (files.length > 0 && status === "connected") {
-        sendFiles(files);
+        setFileError("");
+        sendFiles(files, fileExpiryHours).catch((error) => setFileError(error instanceof Error ? error.message : "File upload failed"));
       }
     },
-    [status, sendFiles]
+    [status, sendFiles, fileExpiryHours]
   );
 
   // Active transfers
@@ -744,6 +774,17 @@ function ChatRoom({
               </div>
             )}
 
+            {fileStorageConfigured() && fileSessionToken && (
+              <button
+                onClick={() => setShowRoomFiles(true)}
+                title="Manage room files"
+                className="font-mono text-xs text-[#171717] px-2.5 py-1 rounded-[6px] border border-[#ebebeb] hover:border-[#171717] transition-colors flex items-center gap-1.5 cursor-pointer"
+              >
+                <FolderOpen size={12} />
+                <span className="hidden sm:inline">Files</span>
+              </button>
+            )}
+
             {password && (
               <>
                 <button
@@ -778,6 +819,7 @@ function ChatRoom({
         </header>
 
         {inviteError && password && <p className="px-4 py-2 text-xs text-rose-600 border-b border-[#ebebeb]">{inviteError}</p>}
+        {fileError && <p className="px-4 py-2 text-xs text-rose-600 border-b border-[#ebebeb] flex items-center gap-2"><AlertCircle size={13} />{fileError}</p>}
         {status === "unauthorized" && <p className="px-4 py-2 text-xs text-rose-600 border-b border-[#ebebeb]">This invite link is invalid or has been replaced. Ask the owner for a new link.</p>}
 
         {/* Active Transfer Progress Bars */}
@@ -949,12 +991,25 @@ function ChatRoom({
             <button
               type="button"
               onClick={() => fileInputRef.current?.click()}
-              disabled={status !== "connected"}
+              disabled={status !== "connected" || (fileStorageConfigured() && !fileSessionToken)}
               className="p-2 text-[#8f8f8f] hover:text-[#171717] transition-colors rounded-[6px] disabled:opacity-30 disabled:cursor-not-allowed cursor-pointer"
               title="Attach files (multiple supported)"
             >
               <Paperclip size={18} />
             </button>
+            {fileStorageConfigured() && (
+              <select
+                value={fileExpiryHours}
+                onChange={(event) => setFileExpiryHours(Number(event.target.value))}
+                className="hidden sm:block rounded-[5px] border border-[#ebebeb] bg-[#fafafa] px-1.5 py-1 font-mono text-[10px] text-[#4d4d4d] outline-none"
+                title="File and link expiry"
+              >
+                <option value={1}>1h</option>
+                <option value={6}>6h</option>
+                <option value={12}>12h</option>
+                <option value={24}>24h</option>
+              </select>
+            )}
             <input
               ref={textInputRef}
               type="text"
@@ -1005,7 +1060,283 @@ function ChatRoom({
             </p>
           </div>
         </footer>
+        {showRoomFiles && fileSessionToken && (
+          <RoomFilesPanel
+            roomId={roomId}
+            sessionToken={fileSessionToken}
+            onClose={() => setShowRoomFiles(false)}
+          />
+        )}
       </div>
+    </div>
+  );
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Room file management
+// ─────────────────────────────────────────────────────────────────────────────
+
+function timeRemaining(expiresAt: number | null): string {
+  if (!expiresAt) return "No expiry";
+  const milliseconds = expiresAt - Date.now();
+  if (milliseconds <= 0) return "Expired";
+  const minutes = Math.ceil(milliseconds / 60000);
+  if (minutes < 60) return `${minutes}m left`;
+  const hours = Math.floor(minutes / 60);
+  const rest = minutes % 60;
+  return rest ? `${hours}h ${rest}m left` : `${hours}h left`;
+}
+
+function RoomFilesPanel({ roomId, sessionToken, onClose }: { roomId: string; sessionToken: string; onClose: () => void }) {
+  const [files, setFiles] = useState<StoredFile[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [busyId, setBusyId] = useState<string | null>(null);
+  const [error, setError] = useState("");
+
+  const refresh = useCallback(async () => {
+    setLoading(true);
+    try {
+      setFiles(await listRoomFiles(roomId, sessionToken));
+      setError("");
+    } catch (value) {
+      setError(value instanceof Error ? value.message : "Could not load room files");
+    } finally {
+      setLoading(false);
+    }
+  }, [roomId, sessionToken]);
+
+  useEffect(() => { void refresh(); }, [refresh]);
+
+  const changeExpiry = async (file: StoredFile, field: "file" | "link", hours: number) => {
+    if (!file.expiresAt || !file.linkExpiresAt) return;
+    setBusyId(file.id);
+    try {
+      const next = Date.now() + hours * 60 * 60 * 1000;
+      const updated = field === "file"
+        ? await updateStoredFile(file.id, sessionToken, next, Math.min(file.linkExpiresAt, next))
+        : await updateStoredFile(file.id, sessionToken, file.expiresAt, hours === 0 ? Date.now() : Math.min(file.expiresAt, next));
+      setFiles((current) => current.map((item) => item.id === file.id ? updated : item));
+      setError("");
+    } catch (value) {
+      setError(value instanceof Error ? value.message : "Could not update expiry");
+    } finally {
+      setBusyId(null);
+    }
+  };
+
+  const remove = async (file: StoredFile) => {
+    if (!window.confirm(`Delete ${file.name}? This cannot be undone.`)) return;
+    setBusyId(file.id);
+    try {
+      await deleteStoredFile(file.id, sessionToken);
+      setFiles((current) => current.filter((item) => item.id !== file.id));
+    } catch (value) {
+      setError(value instanceof Error ? value.message : "Could not delete file");
+    } finally {
+      setBusyId(null);
+    }
+  };
+
+  const download = async (file: StoredFile) => {
+    setBusyId(file.id);
+    try {
+      const url = await createDownloadUrl(file.id, sessionToken);
+      const anchor = document.createElement("a");
+      anchor.href = url;
+      anchor.download = file.name;
+      document.body.appendChild(anchor);
+      anchor.click();
+      anchor.remove();
+    } catch (value) {
+      setError(value instanceof Error ? value.message : "Could not create download link");
+    } finally {
+      setBusyId(null);
+    }
+  };
+
+  return (
+    <div className="absolute inset-0 z-40 flex justify-end bg-black/25 backdrop-blur-[1px]" onMouseDown={(event) => event.target === event.currentTarget && onClose()}>
+      <section className="h-full w-full max-w-lg overflow-y-auto border-l border-[#ebebeb] bg-white shadow-xl">
+        <header className="sticky top-0 z-10 flex h-14 items-center justify-between border-b border-[#ebebeb] bg-white px-5">
+          <div>
+            <h2 className="text-sm font-semibold">Room files</h2>
+            <p className="font-mono text-[10px] text-[#8f8f8f]">ROOM {roomId.toUpperCase()} · MAX 24H</p>
+          </div>
+          <button onClick={onClose} className="rounded-[6px] p-2 text-[#8f8f8f] hover:bg-[#f2f2f2] hover:text-[#171717]" aria-label="Close room files"><X size={16} /></button>
+        </header>
+        <div className="p-5">
+          <div className="mb-4 rounded-[8px] border border-[#ebebeb] bg-[#fafafa] p-3 text-xs leading-relaxed text-[#4d4d4d]">
+            You can manage files you uploaded while this room session is active. The room owner can manage every file in the room.
+          </div>
+          {error && <p className="mb-4 flex items-center gap-2 rounded-[7px] bg-rose-50 px-3 py-2 text-xs text-rose-700"><AlertCircle size={13} />{error}</p>}
+          {loading ? (
+            <div className="py-16 text-center font-mono text-xs text-[#8f8f8f]">LOADING FILES...</div>
+          ) : files.length === 0 ? (
+            <div className="py-16 text-center"><FolderOpen className="mx-auto mb-3 text-[#b5b5b5]" size={28} /><p className="text-sm text-[#737373]">No stored files in this room</p></div>
+          ) : (
+            <div className="space-y-3">
+              {files.map((file) => (
+                <article key={file.id} className="rounded-[9px] border border-[#ebebeb] p-3.5">
+                  <div className="flex items-start gap-3">
+                    <div className="flex h-9 w-9 shrink-0 items-center justify-center rounded-[7px] bg-[#f5f5f5] text-[#4d4d4d]"><FileText size={17} /></div>
+                    <div className="min-w-0 flex-1">
+                      <p className="truncate text-xs font-semibold" title={file.name}>{file.name}</p>
+                      <p className="mt-1 font-mono text-[9px] uppercase text-[#8f8f8f]">{formatFileSize(file.size)} · {file.status} · {timeRemaining(file.expiresAt)}</p>
+                    </div>
+                    {file.status === "ready" && <button disabled={busyId === file.id} onClick={() => void download(file)} className="rounded-[6px] border border-[#ebebeb] p-2 text-[#4d4d4d] hover:border-[#171717] disabled:opacity-40" title="Download"><Download size={14} /></button>}
+                  </div>
+                  {file.canManage && (
+                    <div className="mt-3 grid grid-cols-[1fr_1fr_auto] gap-2 border-t border-[#f2f2f2] pt-3">
+                      <label className="text-[9px] font-mono uppercase text-[#8f8f8f]">File expiry
+                        <select disabled={busyId === file.id} defaultValue="" onChange={(event) => { if (event.target.value) void changeExpiry(file, "file", Number(event.target.value)); event.target.value = ""; }} className="mt-1 w-full rounded-[5px] border border-[#ebebeb] bg-white px-2 py-1.5 text-[10px] text-[#171717]">
+                          <option value="" disabled>Change</option><option value="1">1 hour</option><option value="6">6 hours</option><option value="12">12 hours</option><option value="24">Max 24h</option>
+                        </select>
+                      </label>
+                      <label className="text-[9px] font-mono uppercase text-[#8f8f8f]">Share link
+                        <select disabled={busyId === file.id} defaultValue="" onChange={(event) => { if (event.target.value !== "") void changeExpiry(file, "link", Number(event.target.value)); event.target.value = ""; }} className="mt-1 w-full rounded-[5px] border border-[#ebebeb] bg-white px-2 py-1.5 text-[10px] text-[#171717]">
+                          <option value="" disabled>Change</option><option value="0">Revoke now</option><option value="1">1 hour</option><option value="6">6 hours</option><option value="12">12 hours</option><option value="24">Max 24h</option>
+                        </select>
+                      </label>
+                      <button disabled={busyId === file.id} onClick={() => void remove(file)} className="mt-4 self-end rounded-[6px] border border-rose-200 p-2 text-rose-600 hover:bg-rose-50 disabled:opacity-40" title="Delete permanently"><Trash2 size={14} /></button>
+                    </div>
+                  )}
+                </article>
+              ))}
+            </div>
+          )}
+        </div>
+      </section>
+    </div>
+  );
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Global storage administration
+// ─────────────────────────────────────────────────────────────────────────────
+
+function StorageAdminPage() {
+  const [token, setToken] = useState(() => sessionStorage.getItem("chatp2p_storage_admin") || "");
+  const [password, setPassword] = useState("");
+  const [files, setFiles] = useState<StoredFile[]>([]);
+  const [loading, setLoading] = useState(!!token);
+  const [error, setError] = useState("");
+  const [filter, setFilter] = useState("");
+  const [busyId, setBusyId] = useState<string | null>(null);
+
+  const load = useCallback(async (currentToken = token) => {
+    if (!currentToken) return;
+    setLoading(true);
+    try {
+      const response = await listAdminFiles(currentToken);
+      setFiles(response.files);
+      setError(response.truncated ? "The bucket has more than 1,000 objects. Refine or paginate before bulk actions." : "");
+    } catch (value) {
+      const message = value instanceof Error ? value.message : "Could not load storage";
+      setError(message);
+      if (/unauthorized/i.test(message)) {
+        sessionStorage.removeItem("chatp2p_storage_admin");
+        setToken("");
+      }
+    } finally {
+      setLoading(false);
+    }
+  }, [token]);
+
+  useEffect(() => { if (token) void load(token); }, [token, load]);
+
+  const login = async (event: React.FormEvent) => {
+    event.preventDefault();
+    setLoading(true);
+    try {
+      const session = await adminLogin(password);
+      sessionStorage.setItem("chatp2p_storage_admin", session.token);
+      setToken(session.token);
+      setPassword("");
+      setError("");
+    } catch (value) {
+      setError(value instanceof Error ? value.message : "Login failed");
+      setLoading(false);
+    }
+  };
+
+  const remove = async (file: StoredFile) => {
+    if (!window.confirm(`Permanently delete ${file.name}?`)) return;
+    setBusyId(file.id);
+    try {
+      await deleteAdminFile(file, token);
+      setFiles((current) => current.filter((item) => item.id !== file.id));
+    } catch (value) {
+      setError(value instanceof Error ? value.message : "Delete failed");
+    } finally {
+      setBusyId(null);
+    }
+  };
+
+  const keepToMax = async (file: StoredFile) => {
+    if (file.status === "orphan") return;
+    const max = (file.uploadedAt || file.createdAt) + 24 * 60 * 60 * 1000;
+    setBusyId(file.id);
+    try {
+      const updated = await updateAdminFile(file.id, token, max, max);
+      setFiles((current) => current.map((item) => item.id === file.id ? updated : item));
+    } catch (value) {
+      setError(value instanceof Error ? value.message : "Update failed");
+    } finally {
+      setBusyId(null);
+    }
+  };
+
+  if (!fileStorageConfigured()) {
+    return <div className="min-h-screen bg-[#fafafa] p-8 text-[#171717]"><div className="mx-auto max-w-lg rounded-xl border border-[#ebebeb] bg-white p-6"><h1 className="font-semibold">Storage API is not configured</h1><p className="mt-2 text-sm text-[#737373]">Set VITE_FILE_API_URL and rebuild the app.</p></div></div>;
+  }
+
+  if (!token) {
+    return (
+      <div className="flex min-h-screen items-center justify-center bg-[#fafafa] p-5 text-[#171717]">
+        <form onSubmit={login} className="w-full max-w-sm rounded-[12px] border border-[#ebebeb] bg-white p-6 shadow-sm">
+          <Database size={24} className="mb-5" />
+          <h1 className="text-lg font-semibold">Storage administration</h1>
+          <p className="mt-1 text-xs leading-relaxed text-[#737373]">Manage every object in the ChatP2P bucket. This uses a separate administrator credential.</p>
+          <input autoFocus type="password" value={password} onChange={(event) => setPassword(event.target.value)} placeholder="Administrator password" className="mt-5 w-full rounded-[7px] border border-[#d9d9d9] px-3 py-2.5 text-sm outline-none focus:border-[#171717]" />
+          {error && <p className="mt-3 text-xs text-rose-600">{error}</p>}
+          <button disabled={!password || loading} className="mt-4 w-full rounded-[7px] bg-[#171717] py-2.5 text-sm font-medium text-white disabled:opacity-40">{loading ? "Signing in..." : "Sign in"}</button>
+        </form>
+      </div>
+    );
+  }
+
+  const visible = files.filter((file) => `${file.name} ${file.roomId || ""} ${file.status}`.toLowerCase().includes(filter.toLowerCase()));
+  const totalBytes = files.reduce((sum, file) => file.status === "deleted" ? sum : sum + file.size, 0);
+  const orphanCount = files.filter((file) => file.status === "orphan").length;
+
+  return (
+    <div className="min-h-screen bg-[#fafafa] text-[#171717]">
+      <header className="border-b border-[#ebebeb] bg-white"><div className="mx-auto flex max-w-6xl items-center justify-between px-5 py-4"><div className="flex items-center gap-3"><Database size={20} /><div><h1 className="text-sm font-semibold">Storage administration</h1><p className="font-mono text-[9px] text-[#8f8f8f]">R2 BUCKET INVENTORY</p></div></div><div className="flex gap-2"><button onClick={() => void load()} className="rounded-[6px] border border-[#ebebeb] px-3 py-1.5 text-xs hover:border-[#171717]"><RefreshCw size={12} className="mr-1 inline" />Refresh</button><button onClick={() => { sessionStorage.removeItem("chatp2p_storage_admin"); setToken(""); }} className="rounded-[6px] border border-[#ebebeb] px-3 py-1.5 text-xs text-[#737373] hover:border-rose-300 hover:text-rose-600">Sign out</button></div></div></header>
+      <main className="mx-auto max-w-6xl p-5">
+        <div className="grid gap-3 sm:grid-cols-3">
+          <div className="rounded-[9px] border border-[#ebebeb] bg-white p-4"><HardDrive size={16} className="text-[#737373]" /><p className="mt-3 text-xl font-semibold">{formatFileSize(totalBytes)}</p><p className="font-mono text-[9px] uppercase text-[#8f8f8f]">Current storage</p></div>
+          <div className="rounded-[9px] border border-[#ebebeb] bg-white p-4"><FileText size={16} className="text-[#737373]" /><p className="mt-3 text-xl font-semibold">{files.length}</p><p className="font-mono text-[9px] uppercase text-[#8f8f8f]">Tracked objects</p></div>
+          <div className="rounded-[9px] border border-[#ebebeb] bg-white p-4"><AlertCircle size={16} className={orphanCount ? "text-amber-600" : "text-[#737373]"} /><p className="mt-3 text-xl font-semibold">{orphanCount}</p><p className="font-mono text-[9px] uppercase text-[#8f8f8f]">Orphan objects</p></div>
+        </div>
+        <div className="mt-5 overflow-hidden rounded-[10px] border border-[#ebebeb] bg-white">
+          <div className="flex flex-col gap-3 border-b border-[#ebebeb] p-4 sm:flex-row sm:items-center sm:justify-between"><div><h2 className="text-sm font-semibold">Bucket files</h2><p className="text-[10px] text-[#8f8f8f]">Keep extends only to the hard 24-hour limit.</p></div><input value={filter} onChange={(event) => setFilter(event.target.value)} placeholder="Filter name, room or status" className="w-full rounded-[6px] border border-[#ebebeb] px-3 py-2 text-xs outline-none focus:border-[#171717] sm:w-72" /></div>
+          {error && <p className="border-b border-[#ebebeb] bg-amber-50 px-4 py-2 text-xs text-amber-800">{error}</p>}
+          {loading ? <div className="py-16 text-center font-mono text-xs text-[#8f8f8f]">LOADING BUCKET...</div> : (
+            <div className="divide-y divide-[#f2f2f2]">
+              {visible.map((file) => (
+                <div key={file.id} className="grid gap-3 p-4 sm:grid-cols-[minmax(0,2fr)_1fr_1fr_auto] sm:items-center">
+                  <div className="min-w-0"><p className="truncate text-xs font-semibold" title={file.name}>{file.name}</p><p className="mt-1 truncate font-mono text-[9px] text-[#8f8f8f]">{file.roomId ? `ROOM ${file.roomId}` : file.objectKey || "ORPHAN"}</p></div>
+                  <div><p className="text-xs">{formatFileSize(file.size)}</p><p className="font-mono text-[9px] uppercase text-[#8f8f8f]">{file.status}</p></div>
+                  <div><p className="text-xs">{timeRemaining(file.expiresAt)}</p><p className="font-mono text-[9px] uppercase text-[#8f8f8f]">{file.downloadCount} downloads</p></div>
+                  <div className="flex gap-2">{file.status !== "orphan" && <button disabled={busyId === file.id} onClick={() => void keepToMax(file)} className="rounded-[6px] border border-[#ebebeb] px-2.5 py-1.5 text-[10px] hover:border-[#171717] disabled:opacity-40" title="Keep until the 24-hour maximum"><Clock3 size={12} className="mr-1 inline" />Keep</button>}<button disabled={busyId === file.id} onClick={() => void remove(file)} className="rounded-[6px] border border-rose-200 p-2 text-rose-600 hover:bg-rose-50 disabled:opacity-40" title="Delete"><Trash2 size={13} /></button></div>
+                </div>
+              ))}
+              {!visible.length && <div className="py-16 text-center text-sm text-[#8f8f8f]">No matching files</div>}
+            </div>
+          )}
+        </div>
+        <a href="/" className="mt-5 inline-flex items-center gap-1 text-xs text-[#737373] hover:text-[#171717]"><ExternalLink size={12} />Back to ChatP2P</a>
+      </main>
     </div>
   );
 }

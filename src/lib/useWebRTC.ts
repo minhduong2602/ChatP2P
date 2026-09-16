@@ -2,6 +2,7 @@ import { useEffect, useRef, useState, useCallback } from "react";
 import PartySocket from "partysocket";
 import { v4 as uuidv4 } from "uuid";
 import { partyHost } from "./partyApi";
+import { fileStorageConfigured, uploadStoredFile } from "./fileApi";
 
 export type Message = {
   id: string;
@@ -13,6 +14,9 @@ export type Message = {
   fileUrl?: string;
   fileType?: string;
   fileSize?: number;
+  fileId?: string;
+  expiresAt?: number;
+  linkExpiresAt?: number;
   timestamp: number;
   replyTo?: ReplyReference;
 };
@@ -52,6 +56,7 @@ export function useWebRTC(roomId: string | null, nickname: string, credential: {
   const [transferProgress, setTransferProgress] = useState<Record<string, FileProgress>>({});
   const [typingPeers, setTypingPeers] = useState<Set<string>>(new Set());
   const [reactions, setReactions] = useState<Reactions>({});
+  const [fileSessionToken, setFileSessionToken] = useState<string>("");
 
   const socketRef = useRef<PartySocket | null>(null);
   const myPeerIdRef = useRef<string>("");
@@ -80,6 +85,7 @@ export function useWebRTC(roomId: string | null, nickname: string, credential: {
   const clearMessages = useCallback(() => {
     setMessages([]);
     setReactions({});
+    setFileSessionToken("");
   }, []);
 
   // Send a JSON message over the relay socket
@@ -151,6 +157,7 @@ export function useWebRTC(roomId: string | null, nickname: string, credential: {
         case "room-joined": {
           const numClients = data.numClients as number;
           myPeerIdRef.current = data.peerId as string;
+          setFileSessionToken(typeof data.fileSessionToken === "string" ? data.fileSessionToken : "");
           setPeerCount(numClients);
           if (numClients >= 2) {
             setStatus("connected");
@@ -357,6 +364,27 @@ export function useWebRTC(roomId: string | null, nickname: string, credential: {
           }
           break;
         }
+
+        case "file-ready": {
+          const senderId = data.senderId as string;
+          if (!data.id || !data.name || !data.fileUrl) return;
+          addMessage({
+            id: data.id as string,
+            senderId,
+            isMe: false,
+            senderName: peersRef.current[senderId] || "Unknown",
+            type: "file",
+            content: data.name as string,
+            fileId: data.id as string,
+            fileUrl: data.fileUrl as string,
+            fileType: (data.fileType as string) || "application/octet-stream",
+            fileSize: data.size as number,
+            expiresAt: data.expiresAt as number,
+            linkExpiresAt: data.linkExpiresAt as number,
+            timestamp: (data.timestamp as number) || Date.now(),
+          });
+          break;
+        }
       }
     });
 
@@ -419,8 +447,65 @@ export function useWebRTC(roomId: string | null, nickname: string, credential: {
 
   // ── sendFile (chunked base64 relay with progress) ────────────
   const sendFile = useCallback(
-    async (file: File) => {
+    async (file: File, expiryHours = 24) => {
       if (status !== "connected") return;
+
+      if (fileStorageConfigured()) {
+        if (!fileSessionToken) throw new Error("File storage is not ready. Reconnect and try again.");
+        const pendingId = uuidv4();
+        setTransferProgress((prev) => ({
+          ...prev,
+          [pendingId]: { name: file.name, progress: 0, direction: "upload", done: false },
+        }));
+        try {
+          const uploaded = await uploadStoredFile(roomId || "", fileSessionToken, file, expiryHours, (progress) => {
+            setTransferProgress((prev) => ({
+              ...prev,
+              [pendingId]: { ...prev[pendingId], progress },
+            }));
+          });
+          const message = {
+            type: "file-ready",
+            id: uploaded.file.id,
+            name: uploaded.file.name,
+            size: uploaded.file.size,
+            fileType: uploaded.file.contentType,
+            fileUrl: uploaded.downloadUrl,
+            expiresAt: uploaded.file.expiresAt,
+            linkExpiresAt: uploaded.file.linkExpiresAt,
+            timestamp: Date.now(),
+          };
+          sendRelayRef.current(message);
+          addMessage({
+            id: uploaded.file.id,
+            senderId: myPeerIdRef.current,
+            isMe: true,
+            senderName: nickname,
+            type: "file",
+            content: uploaded.file.name,
+            fileId: uploaded.file.id,
+            fileUrl: uploaded.downloadUrl,
+            fileType: uploaded.file.contentType,
+            fileSize: uploaded.file.size,
+            expiresAt: uploaded.file.expiresAt || undefined,
+            linkExpiresAt: uploaded.file.linkExpiresAt || undefined,
+            timestamp: Date.now(),
+          });
+          setTransferProgress((prev) => ({
+            ...prev,
+            [pendingId]: { ...prev[pendingId], progress: 100, done: true },
+          }));
+        } finally {
+          setTimeout(() => {
+            setTransferProgress((prev) => {
+              const next = { ...prev };
+              delete next[pendingId];
+              return next;
+            });
+          }, 3000);
+        }
+        return;
+      }
 
       const fileId = uuidv4();
       const arrayBuffer = await file.arrayBuffer();
@@ -490,15 +575,15 @@ export function useWebRTC(roomId: string | null, nickname: string, credential: {
         });
       }, 3000);
     },
-    [status, nickname, addMessage]
+    [status, nickname, addMessage, fileSessionToken, roomId]
   );
 
   // ── sendFiles (send multiple files sequentially) ─────────────
   const sendFiles = useCallback(
-    async (files: File[]) => {
+    async (files: File[], expiryHours = 24) => {
       for (const file of files) {
         if (status !== "connected") break;
-        await sendFile(file);
+        await sendFile(file, expiryHours);
       }
     },
     [status, sendFile]
@@ -528,5 +613,6 @@ export function useWebRTC(roomId: string | null, nickname: string, credential: {
     transferProgress,
     typingPeers,
     reactions,
+    fileSessionToken,
   };
 }
