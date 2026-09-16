@@ -27,10 +27,8 @@ import { cn } from "./lib/utils";
 import { format } from "date-fns";
 import { QRScanner } from "./components/QRScanner";
 import { useNotification } from "./lib/useNotification";
+import { requestInvite, verifyOwnerPassword } from "./lib/partyApi";
 
-const EXPECTED_PASSWORD = (
-  (import.meta.env.VITE_APP_PASSWORD as string) || "chat123"
-).trim();
 const STORAGE_KEY = "chatp2p_auth_token";
 const EMOJI_LIST = ["👍", "❤️", "😂", "😮", "😢"];
 
@@ -63,26 +61,15 @@ function VercelTriangle({ className = "w-4 h-4 text-[#171717]" }: { className?: 
 }
 
 export default function App() {
-  const [password, setPassword] = useState<string>(() => {
-    const saved = localStorage.getItem(STORAGE_KEY)?.trim();
-    if (saved && saved === EXPECTED_PASSWORD) return saved;
-
-    if (typeof window !== "undefined") {
-      const urlParams = new URLSearchParams(window.location.search);
-      const pwd = urlParams.get("pwd")?.trim();
-      if (pwd && pwd === EXPECTED_PASSWORD) {
-        localStorage.setItem(STORAGE_KEY, pwd);
-        return pwd;
-      }
-    }
-    return "";
-  });
+  const [password, setPassword] = useState("");
+  const [checkingPassword, setCheckingPassword] = useState(true);
 
   const [passwordInput, setPasswordInput] = useState("");
   const [passwordError, setPasswordError] = useState("");
   const [showPassword, setShowPassword] = useState(false);
 
-  const [roomId, setRoomId] = useState<string | null>(null);
+  const [roomId, setRoomId] = useState<string | null>(() => new URLSearchParams(window.location.search).get("room")?.trim() || null);
+  const [guestInvite, setGuestInvite] = useState<string | null>(() => new URLSearchParams(window.location.search).get("invite")?.trim() || null);
   const [joinInput, setJoinInput] = useState("");
   const [joinError, setJoinError] = useState("");
   const [showScanner, setShowScanner] = useState(false);
@@ -93,20 +80,52 @@ export default function App() {
 
   useEffect(() => {
     const params = new URLSearchParams(window.location.search);
-    const room = params.get("room")?.trim();
-    if (room) {
-      setRoomId(room);
+    if (params.has("invite") && params.has("room")) {
+      setCheckingPassword(false);
+      return;
     }
+    const candidate = params.get("pwd")?.trim() || localStorage.getItem(STORAGE_KEY)?.trim();
+    if (!candidate) {
+      setCheckingPassword(false);
+      return;
+    }
+    let cancelled = false;
+    verifyOwnerPassword(candidate).then((valid) => {
+      if (cancelled) return;
+      if (valid) {
+        localStorage.setItem(STORAGE_KEY, candidate);
+        setPassword(candidate);
+        if (params.has("pwd")) {
+          const url = new URL(window.location.href);
+          url.searchParams.delete("pwd");
+          window.history.replaceState({}, "", url.toString());
+        }
+      } else {
+        localStorage.removeItem(STORAGE_KEY);
+      }
+    }).catch(() => {
+      if (!cancelled) setPasswordError("Could not reach the relay. Try again.");
+    }).finally(() => {
+      if (!cancelled) setCheckingPassword(false);
+    });
+    return () => { cancelled = true; };
   }, []);
 
-  const handleUnlock = (e?: React.FormEvent) => {
+  const handleUnlock = async (e?: React.FormEvent) => {
     if (e) e.preventDefault();
-    if (passwordInput.trim() === EXPECTED_PASSWORD) {
-      localStorage.setItem(STORAGE_KEY, passwordInput.trim());
-      setPassword(passwordInput.trim());
-      setPasswordError("");
-    } else {
-      setPasswordError("Invalid password. Access denied.");
+    setCheckingPassword(true);
+    try {
+      if (await verifyOwnerPassword(passwordInput.trim())) {
+        localStorage.setItem(STORAGE_KEY, passwordInput.trim());
+        setPassword(passwordInput.trim());
+        setPasswordError("");
+      } else {
+        setPasswordError("Invalid password. Access denied.");
+      }
+    } catch {
+      setPasswordError("Could not reach the relay. Try again.");
+    } finally {
+      setCheckingPassword(false);
     }
   };
 
@@ -126,6 +145,7 @@ export default function App() {
   const handleCreateRoom = () => {
     const newRoom = uuidv4().slice(0, 8);
     window.history.pushState({}, "", `?room=${newRoom}`);
+    setGuestInvite(null);
     setRoomId(newRoom);
   };
 
@@ -136,6 +156,7 @@ export default function App() {
       return;
     }
     window.history.pushState({}, "", `?room=${raw}`);
+    setGuestInvite(null);
     setRoomId(raw);
   };
 
@@ -150,7 +171,7 @@ export default function App() {
   };
 
   // ── 1. Password Gate ─────────────────────────────────────────
-  if (password !== EXPECTED_PASSWORD) {
+  if (!guestInvite && !password) {
     return (
       <div className="relative h-[100dvh] max-h-[100dvh] w-screen bg-[#fafafa] text-[#171717] font-sans flex items-center justify-center p-4 overflow-hidden">
         <div className="vercel-mesh-glow" />
@@ -206,10 +227,11 @@ export default function App() {
 
             <button
               type="submit"
-              className="w-full bg-[#171717] hover:bg-black text-white rounded-full py-2.5 px-4 text-sm font-medium transition-colors cursor-pointer flex items-center justify-center gap-2 shadow-sm"
+              disabled={checkingPassword}
+              className="w-full bg-[#171717] hover:bg-black text-white rounded-full py-2.5 px-4 text-sm font-medium transition-colors cursor-pointer flex items-center justify-center gap-2 shadow-sm disabled:opacity-50"
             >
               <Unlock size={16} />
-              <span>Unlock Instance</span>
+              <span>{checkingPassword ? "Checking..." : "Unlock Instance"}</span>
             </button>
           </form>
 
@@ -348,7 +370,7 @@ export default function App() {
   }
 
   // ── 3. Unlocked: Chat Room ───────────────────────────────────
-  return <ChatRoom roomId={roomId} nickname={nickname || `Peer-${uuidv4().slice(0, 4).toUpperCase()}`} password={password} onLock={handleLock} />;
+  return <ChatRoom roomId={roomId} nickname={nickname || `Peer-${uuidv4().slice(0, 4).toUpperCase()}`} password={guestInvite ? undefined : password} invite={guestInvite || undefined} onLock={handleLock} onLeave={() => { window.history.pushState({}, "", window.location.pathname); setGuestInvite(null); setRoomId(null); }} />;
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -359,12 +381,16 @@ function ChatRoom({
   roomId,
   nickname,
   password,
+  invite,
   onLock,
+  onLeave,
 }: {
   roomId: string;
   nickname: string;
-  password: string;
+  password?: string;
+  invite?: string;
   onLock: () => void;
+  onLeave: () => void;
 }) {
   const {
     status,
@@ -380,7 +406,7 @@ function ChatRoom({
     transferProgress,
     typingPeers,
     reactions,
-  } = useWebRTC(roomId, nickname, password);
+  } = useWebRTC(roomId, nickname, { password, invite });
 
   const { notify } = useNotification();
 
@@ -388,6 +414,9 @@ function ChatRoom({
   const fileInputRef = useRef<HTMLInputElement>(null);
   const scrollRef = useRef<HTMLDivElement>(null);
   const [copied, setCopied] = useState(false);
+  const [inviteToken, setInviteToken] = useState<string | null>(invite || null);
+  const [inviteError, setInviteError] = useState("");
+  const [inviteBusy, setInviteBusy] = useState(false);
   const [isDragging, setIsDragging] = useState(false);
   const dragCounter = useRef(0);
   const [showClearConfirm, setShowClearConfirm] = useState(false);
@@ -424,15 +453,49 @@ function ChatRoom({
     prevMsgCount.current = messages.length;
   }, [messages, notify]);
 
-  const shareUrl =
-    typeof window !== "undefined"
-      ? `${window.location.origin}${window.location.pathname}?room=${roomId}&pwd=${encodeURIComponent(password)}`
-      : "";
+  useEffect(() => {
+    if (!password) return;
+    let cancelled = false;
+    setInviteBusy(true);
+    requestInvite(roomId, password, "get").then((token) => {
+      if (!cancelled) { setInviteToken(token); setInviteError(""); }
+    }).catch((error: Error) => {
+      if (!cancelled) setInviteError(error.message);
+    }).finally(() => {
+      if (!cancelled) setInviteBusy(false);
+    });
+    return () => { cancelled = true; };
+  }, [roomId, password]);
 
-  const handleCopyLink = () => {
-    navigator.clipboard.writeText(shareUrl || window.location.href);
-    setCopied(true);
-    setTimeout(() => setCopied(false), 2000);
+  const shareUrl = inviteToken
+    ? `${window.location.origin}${window.location.pathname}?room=${encodeURIComponent(roomId)}&invite=${inviteToken}`
+    : "";
+
+  const handleCopyLink = async () => {
+    if (!shareUrl || !password) return;
+    try {
+      await navigator.clipboard.writeText(shareUrl);
+      setCopied(true);
+      setInviteError("");
+      setTimeout(() => setCopied(false), 2000);
+    } catch {
+      setInviteError("Could not copy link. Check clipboard permissions.");
+    }
+  };
+
+  const handleRotateInvite = async () => {
+    if (!password || inviteBusy) return;
+    setInviteBusy(true);
+    try {
+      const token = await requestInvite(roomId, password, "rotate");
+      setInviteToken(token);
+      setCopied(false);
+      setInviteError("");
+    } catch (error) {
+      setInviteError(error instanceof Error ? error.message : "Could not refresh invite");
+    } finally {
+      setInviteBusy(false);
+    }
   };
 
   const handleSend = (e: React.FormEvent) => {
@@ -491,8 +554,6 @@ function ChatRoom({
   const activeTransfers = (Object.entries(transferProgress) as [string, FileProgress][]).filter(
     ([, p]) => !p.done
   );
-
-  const currentUrl = typeof window !== "undefined" ? window.location.href : "";
 
   return (
     <div
@@ -562,6 +623,11 @@ function ChatRoom({
                     <span>DISCONNECTED</span>
                   </span>
                 )}
+                {status === "unauthorized" && (
+                  <span className="hidden sm:flex font-mono text-[11px] px-2.5 py-0.5 rounded-full border border-rose-200 bg-rose-50 text-rose-700 items-center gap-1.5">
+                    INVITE INVALID
+                  </span>
+                )}
               </div>
             </div>
           </div>
@@ -626,24 +692,41 @@ function ChatRoom({
               </div>
             )}
 
-            <button
-              onClick={handleCopyLink}
-              className="font-mono text-xs text-[#171717] px-2.5 py-1 rounded-[6px] border border-[#ebebeb] hover:border-[#171717] transition-colors flex items-center gap-1.5 cursor-pointer"
-            >
-              {copied ? <Check size={12} className="text-emerald-600" /> : <LinkIcon size={12} />}
-              <span>{copied ? "Copied" : "Copy Link"}</span>
-            </button>
+            {password && (
+              <>
+                <button
+                  onClick={handleCopyLink}
+                  disabled={!shareUrl || inviteBusy}
+                  className="font-mono text-xs text-[#171717] px-2.5 py-1 rounded-[6px] border border-[#ebebeb] hover:border-[#171717] transition-colors flex items-center gap-1.5 cursor-pointer disabled:opacity-50"
+                >
+                  {copied ? <Check size={12} className="text-emerald-600" /> : <LinkIcon size={12} />}
+                  <span>{copied ? "Copied" : inviteBusy ? "Preparing..." : "Copy Link"}</span>
+                </button>
+                <button
+                  onClick={handleRotateInvite}
+                  disabled={inviteBusy}
+                  title="Create a new link and revoke the old one"
+                  className="font-mono text-xs text-[#171717] px-2.5 py-1 rounded-[6px] border border-[#ebebeb] hover:border-[#171717] transition-colors flex items-center gap-1.5 cursor-pointer disabled:opacity-50"
+                >
+                  <RefreshCw size={12} />
+                  <span className="hidden sm:inline">New Link</span>
+                </button>
+              </>
+            )}
 
             <button
-              onClick={onLock}
-              title="Lock session"
+              onClick={password ? onLock : onLeave}
+              title={password ? "Lock session" : "Leave room"}
               className="font-mono text-xs text-[#8f8f8f] hover:text-rose-600 px-2 py-1 rounded-[6px] border border-[#ebebeb] hover:border-rose-300 transition-colors flex items-center gap-1 cursor-pointer"
             >
               <LogOut size={12} />
-              <span className="hidden sm:inline">Lock</span>
+              <span className="hidden sm:inline">{password ? "Lock" : "Leave"}</span>
             </button>
           </div>
         </header>
+
+        {inviteError && password && <p className="px-4 py-2 text-xs text-rose-600 border-b border-[#ebebeb]">{inviteError}</p>}
+        {status === "unauthorized" && <p className="px-4 py-2 text-xs text-rose-600 border-b border-[#ebebeb]">This invite link is invalid or has been replaced. Ask the owner for a new link.</p>}
 
         {/* Active Transfer Progress Bars */}
         {activeTransfers.length > 0 && (
@@ -676,20 +759,23 @@ function ChatRoom({
         <div className="flex-1 overflow-y-auto min-h-0 p-4 sm:p-6 bg-[#fafafa]" ref={scrollRef}>
           {status !== "connected" && messages.length === 0 && (
             <div className="h-full flex flex-col items-center justify-center text-center max-w-sm mx-auto space-y-4 my-auto py-8">
-              <div className="bg-white p-6 rounded-[12px] border border-[#ebebeb] shadow-[0_1px_2px_rgba(0,0,0,0.04)] flex flex-col items-center space-y-3">
-                <div className="p-2 border border-[#ebebeb] rounded-[6px] bg-white">
-                  <QRCodeSVG value={shareUrl || currentUrl} size={160} level="M" className="text-[#171717]" />
+              {password && shareUrl && (
+                <div className="bg-white p-6 rounded-[12px] border border-[#ebebeb] shadow-[0_1px_2px_rgba(0,0,0,0.04)] flex flex-col items-center space-y-3">
+                  <div className="p-2 border border-[#ebebeb] rounded-[6px] bg-white">
+                    <QRCodeSVG value={shareUrl} size={160} level="M" className="text-[#171717]" />
+                  </div>
+                  <p className="font-mono text-[10px] text-[#8f8f8f] uppercase tracking-wider">
+                    SCAN WITH CAMERA TO JOIN INSTANTLY
+                  </p>
                 </div>
-                <p className="font-mono text-[10px] text-[#8f8f8f] uppercase tracking-wider">
-                  SCAN WITH CAMERA TO JOIN INSTANTLY
-                </p>
-              </div>
+              )}
 
               <div className="space-y-1.5">
                 <h3 className="text-base font-semibold tracking-tight text-[#171717]">
                   {status === "waiting" && "Waiting for Peer to Join"}
                   {status === "connecting" && "Establishing Edge Connection..."}
                   {status === "disconnected" && "Peer Left Room"}
+                  {status === "unauthorized" && "Invite Link Invalid"}
                 </h3>
                 <p className="text-xs text-[#4d4d4d] leading-relaxed">
                   {status === "waiting" &&
@@ -698,25 +784,30 @@ function ChatRoom({
                     "Connecting to PartyKit relay server. Please hold on..."}
                   {status === "disconnected" &&
                     "The session ended. Re-share the room link to connect with someone else."}
+                  {status === "unauthorized" &&
+                    "This invite is invalid or has been replaced. Ask the room owner for a new link."}
                 </p>
               </div>
 
-              {status === "disconnected" ? (
+              {status === "unauthorized" ? (
+                <button onClick={onLeave} className="rounded-full bg-[#171717] text-white text-xs px-4 py-2 cursor-pointer">Leave Room</button>
+              ) : status === "disconnected" ? (
                 <button
                   onClick={retryConnection}
                   className="rounded-full bg-[#171717] hover:bg-black text-white text-xs px-4 py-2 font-medium flex items-center gap-1.5 shadow-sm cursor-pointer"
                 >
                   <RefreshCw size={13} /> Reconnect
                 </button>
-              ) : (
+              ) : password ? (
                 <button
                   onClick={handleCopyLink}
-                  className="rounded-full bg-[#171717] hover:bg-black text-white text-xs px-4 py-2 font-medium flex items-center gap-1.5 shadow-sm cursor-pointer"
+                  disabled={!shareUrl || inviteBusy}
+                  className="rounded-full bg-[#171717] hover:bg-black text-white text-xs px-4 py-2 font-medium flex items-center gap-1.5 shadow-sm cursor-pointer disabled:opacity-50"
                 >
                   {copied ? <Check size={13} /> : <LinkIcon size={13} />}
-                  <span>{copied ? "Link Copied!" : "Copy Direct Share Link"}</span>
+                  <span>{copied ? "Link Copied!" : inviteBusy ? "Preparing Link..." : "Copy Direct Share Link"}</span>
                 </button>
-              )}
+              ) : null}
             </div>
           )}
 
@@ -823,6 +914,7 @@ function ChatRoom({
               {status === "waiting"     && "● WAITING FOR PEER"}
               {status === "connecting"  && "● CONNECTING..."}
               {status === "disconnected" && "● DISCONNECTED"}
+              {status === "unauthorized" && "● INVITE INVALID"}
             </span>
             {/* Desktop: security tagline */}
             <p className="hidden sm:block font-mono text-[10px] text-[#8f8f8f] tracking-wide">

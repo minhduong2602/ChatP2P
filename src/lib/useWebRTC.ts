@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState, useCallback } from "react";
 import PartySocket from "partysocket";
 import { v4 as uuidv4 } from "uuid";
+import { partyHost } from "./partyApi";
 
 export type Message = {
   id: string;
@@ -19,7 +20,8 @@ export type ConnectionStatus =
   | "connecting" // Socket connecting to PartyKit
   | "waiting" // In room, waiting for peer
   | "connected" // Peer present, relay active
-  | "disconnected"; // Peer left or error
+  | "disconnected" // Peer left or error
+  | "unauthorized"; // Invite revoked or invalid
 
 export type FileProgress = {
   name: string;
@@ -34,7 +36,7 @@ export type Reactions = Record<string, Record<string, number>>; // msgId → emo
 // File chunking constants for relay
 const CHUNK_SIZE = 32 * 1024; // 32 KB per chunk as base64 over WebSocket
 
-export function useWebRTC(roomId: string | null, nickname: string, password?: string) {
+export function useWebRTC(roomId: string | null, nickname: string, credential: { password?: string; invite?: string }) {
   const [status, setStatus] = useState<ConnectionStatus>("connecting");
   const [peerCount, setPeerCount] = useState<number>(1);
   const [peers, setPeers] = useState<Record<string, string>>({}); // peerId -> nickname
@@ -95,21 +97,16 @@ export function useWebRTC(roomId: string | null, nickname: string, password?: st
     setTypingPeers(new Set());
     setReactions({});
 
-    const rawHost =
-      (import.meta.env.VITE_PARTYKIT_HOST as string) || "localhost:1999";
-    const partyHost = rawHost
-      .replace(/^https?:\/\//, "")
-      .replace(/^wss?:\/\//, "")
-      .replace(/\/.*$/, "");
+    const relayHost = partyHost();
 
     if (import.meta.env.DEV) {
-      console.log(`[Relay] Connecting to "${partyHost}" room "${roomId}"`);
+      console.log(`[Relay] Connecting to "${relayHost}" room "${roomId}"`);
     }
 
     const socket = new PartySocket({
-      host: partyHost,
+      host: relayHost,
       room: roomId,
-      query: password ? { auth: password } : undefined,
+      query: credential.password ? { auth: credential.password } : { invite: credential.invite },
       connectionTimeout: 15000,
       maxRetries: 20,
     });
@@ -125,7 +122,10 @@ export function useWebRTC(roomId: string | null, nickname: string, password?: st
 
     socket.addEventListener("close", (e: CloseEvent) => {
       console.log(`[Relay] Socket CLOSED code=${e.code}`);
-      if (e.code !== 1000 && e.code !== 4000) {
+      if (e.code === 4001) {
+        socket.close();
+        setStatus("unauthorized");
+      } else if (e.code !== 1000 && e.code !== 4000) {
         setStatus("disconnected");
       }
     });
@@ -345,7 +345,7 @@ export function useWebRTC(roomId: string | null, nickname: string, password?: st
       typingTimersRef.current = {};
       if (typingCooldownRef.current) clearTimeout(typingCooldownRef.current);
     };
-  }, [roomId, nickname, password, addMessage]);
+  }, [roomId, nickname, credential.password, credential.invite, addMessage]);
 
   // ── sendMessage ──────────────────────────────────────────────
   const sendMessage = useCallback(

@@ -1,75 +1,148 @@
 import type * as Party from "partykit/server";
 
-/**
- * ChatSignalingServer — Pure relay server via PartyKit WebSocket.
- * No WebRTC signaling needed. All messages relay directly through
- * Cloudflare Edge for <30ms latency globally.
- */
+const INVITE_KEY = "invite-token";
+
+function appPassword(env: Record<string, unknown>): string {
+  return typeof env.APP_PASSWORD === "string" ? env.APP_PASSWORD.trim() : "";
+}
+
+function allowedOrigin(req: { headers: { get(name: string): string | null } }, env: Record<string, unknown>): string | null {
+  const origin = req.headers.get("Origin");
+  if (!origin) return null;
+  const configured = typeof env.APP_URL === "string" ? env.APP_URL : "";
+  try {
+    if (configured && origin === new URL(configured).origin) return origin;
+    if (!configured && /^https?:\/\/localhost(?::\d+)?$/.test(origin)) return origin;
+    if (!configured && /^https?:\/\/127\.0\.0\.1(?::\d+)?$/.test(origin)) return origin;
+  } catch {
+    return null;
+  }
+  return null;
+}
+
+function corsHeaders(origin: string | null): HeadersInit {
+  return origin
+    ? { "Access-Control-Allow-Origin": origin, "Access-Control-Allow-Methods": "POST, OPTIONS", "Access-Control-Allow-Headers": "Content-Type", Vary: "Origin" }
+    : {};
+}
+
+function json(body: unknown, status: number, origin: string | null): Response {
+  return new Response(JSON.stringify(body), {
+    status,
+    headers: { "Content-Type": "application/json", "Cache-Control": "no-store", ...corsHeaders(origin) },
+  });
+}
+
+function newInvite(): string {
+  const bytes = crypto.getRandomValues(new Uint8Array(32));
+  return Array.from(bytes, (byte) => byte.toString(16).padStart(2, "0")).join("");
+}
+
+/** Relay for a room. Password authenticates owners; a room-bound invite authenticates guests. */
 export default class ChatSignalingServer implements Party.Server {
   constructor(readonly room: Party.Room) {}
 
-  static onBeforeConnect(req: Party.Request, lobby: Party.Lobby) {
-    const expectedPassword =
-      (lobby.env.APP_PASSWORD as string | undefined) ||
-      (lobby.env.VITE_APP_PASSWORD as string | undefined) ||
-      "chat123";
-
-    if (expectedPassword) {
-      const url = new URL(req.url);
-      const auth = url.searchParams.get("auth");
-      if (!auth || auth !== expectedPassword) {
-        console.warn(`[PartyKit] Connection rejected: invalid auth token from ${req.headers.get("x-forwarded-for") || "unknown"}`);
-        return new Response("Unauthorized: Invalid or missing password", { status: 401 });
-      }
+  static async onFetch(req: Request, lobby: Party.FetchLobby) {
+    if (new URL(req.url).pathname !== "/auth/verify") return null;
+    const origin = allowedOrigin(req, lobby.env);
+    if (req.method === "OPTIONS") {
+      return origin ? new Response(null, { status: 204, headers: corsHeaders(origin) }) : new Response("Forbidden", { status: 403 });
     }
-
-    return req;
+    if (req.method !== "POST" || !origin) return json({ error: "Forbidden" }, 403, origin);
+    const expected = appPassword(lobby.env);
+    const supplied = await req.text();
+    return expected && supplied === expected
+      ? json({ ok: true }, 200, origin)
+      : json({ error: "Invalid password" }, 401, origin);
   }
 
-  onConnect(conn: Party.Connection) {
-    const connections = [...this.room.getConnections()];
-    const numClients = connections.length;
+  static onBeforeRequest(req: Request, lobby: Party.Lobby) {
+    if (req.method !== "OPTIONS") return req;
+    const origin = allowedOrigin(req, lobby.env);
+    return origin ? new Response(null, { status: 204, headers: corsHeaders(origin) }) : new Response("Forbidden", { status: 403 });
+  }
 
-    console.log(`[PartyKit] +conn ${conn.id} room="${this.room.id}" peers=${numClients}`);
+  static onBeforeConnect(req: Party.Request, lobby: Party.Lobby) {
+    const expected = appPassword(lobby.env);
+    if (!expected) return new Response("Server password is not configured", { status: 503 });
+    const params = new URL(req.url).searchParams;
+    const auth = params.get("auth");
+    const invite = params.get("invite");
+    if (auth === expected || invite) return req;
+    return new Response("Unauthorized", { status: 401 });
+  }
 
-    if (numClients > 50) {
+  async onRequest(req: Party.Request) {
+    const origin = allowedOrigin(req, this.room.env);
+    if (new URL(req.url).pathname.split("/").pop() !== "invite" || req.method !== "POST" || !origin) {
+      return json({ error: "Forbidden" }, 403, origin);
+    }
+    const expected = appPassword(this.room.env);
+    let payload: { password?: string; action?: string };
+    try {
+      payload = await req.json();
+    } catch {
+      return json({ error: "Invalid request" }, 400, origin);
+    }
+    if (!expected || payload.password !== expected) return json({ error: "Unauthorized" }, 401, origin);
+    if (payload.action !== "get" && payload.action !== "rotate") return json({ error: "Invalid action" }, 400, origin);
+    let invite = await this.room.storage.get<string>(INVITE_KEY);
+    if (!invite || payload.action === "rotate") {
+      invite = newInvite();
+      await this.room.storage.put(INVITE_KEY, invite);
+    }
+    return json({ invite }, 200, origin);
+  }
+
+  async onConnect(conn: Party.Connection) {
+    const params = new URL(conn.uri).searchParams;
+    const expected = appPassword(this.room.env);
+    const owner = !!expected && params.get("auth") === expected;
+    const invite = params.get("invite");
+    const current = await this.room.storage.get<string>(INVITE_KEY);
+    if (!owner && (!current || invite !== current)) {
+      conn.close(4001, "invalid-invite");
+      return;
+    }
+
+    const connections = [...this.room.getConnections()].filter((peer) => (peer.state as { authorized?: boolean } | null)?.authorized);
+    if (connections.length >= 50) {
       conn.send(JSON.stringify({ type: "room-full" }));
       conn.close(4000, "room-full");
       return;
     }
-
-    // Tell the joining peer their room info
+    conn.setState({ authorized: true, owner });
+    const numClients = connections.length + 1;
     conn.send(JSON.stringify({ type: "room-joined", numClients, peerId: conn.id }));
-
-    // Tell everyone else that a peer joined
     if (numClients >= 2) {
-      this.room.broadcast(
-        JSON.stringify({ type: "peer-joined", peerId: conn.id }),
-        [conn.id]
-      );
+      for (const peer of connections) {
+        if (peer.id !== conn.id) peer.send(JSON.stringify({ type: "peer-joined", peerId: conn.id }));
+      }
     }
   }
 
   onMessage(message: string, sender: Party.Connection) {
+    if (!(sender.state as { authorized?: boolean } | null)?.authorized) return;
     try {
       const data = JSON.parse(message);
-      // Inject the sender's ID so other peers know who sent it
       data.senderId = sender.id;
-      
-      console.log(`[PartyKit] relay "${data.type}" from ${sender.id}`);
-      // Relay to all other peers
-      this.room.broadcast(JSON.stringify(data), [sender.id]);
+      for (const peer of this.room.getConnections()) {
+        if (peer.id !== sender.id && (peer.state as { authorized?: boolean } | null)?.authorized) {
+          peer.send(JSON.stringify(data));
+        }
+      }
     } catch {
       console.warn("[PartyKit] Non-JSON message ignored");
     }
   }
 
   onClose(conn: Party.Connection) {
-    console.log(`[PartyKit] -conn ${conn.id} left room="${this.room.id}"`);
-    this.room.broadcast(
-      JSON.stringify({ type: "peer-disconnected", peerId: conn.id }),
-      [conn.id]
-    );
+    if (!(conn.state as { authorized?: boolean } | null)?.authorized) return;
+    for (const peer of this.room.getConnections()) {
+      if (peer.id !== conn.id && (peer.state as { authorized?: boolean } | null)?.authorized) {
+        peer.send(JSON.stringify({ type: "peer-disconnected", peerId: conn.id }));
+      }
+    }
   }
 
   onError(conn: Party.Connection, err: Error) {
