@@ -222,7 +222,7 @@ async function handleAdmin(request: Request, env: Env, pathname: string, origin:
   if (!(await isAdmin(request, env))) return json({ error: "Unauthorized" }, 401, origin);
 
   if (pathname === "/admin/files" && request.method === "GET") {
-    const rows = (await env.DB.prepare("SELECT * FROM files ORDER BY created_at DESC LIMIT 1000").all<FileRow>()).results || [];
+    const rows = (await env.DB.prepare("SELECT * FROM files WHERE status != 'deleted' ORDER BY created_at DESC LIMIT 1000").all<FileRow>()).results || [];
     const listed = await env.FILES.list({ limit: 1000 });
     const byKey = new Map(rows.map((file) => [file.object_key, file]));
     const orphans = listed.objects.filter((object) => !byKey.has(object.key)).map((object) => ({
