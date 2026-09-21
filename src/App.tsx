@@ -1493,7 +1493,7 @@ function MessageBubble({
 
       <div
         className={cn(
-          "max-w-[85%] sm:max-w-[70%] flex flex-col",
+          "min-w-0 max-w-[85%] sm:max-w-[70%] flex flex-col",
           isMe ? "items-end" : "items-start"
         )}
       >
@@ -1504,11 +1504,11 @@ function MessageBubble({
         )}
 
         {/* Outer wrapper: group here so both copy & 😊 buttons respond to hover */}
-        <div className={cn("relative group pb-4")}>
+        <div className={cn("relative group max-w-full min-w-0 pb-4")}>
           {/* Bubble */}
           <div
             className={cn(
-              "rounded-[12px] overflow-hidden text-sm leading-relaxed",
+              "min-w-0 max-w-full rounded-[12px] overflow-hidden text-sm leading-relaxed",
               isMe
                 ? "bg-[#171717] text-white rounded-br-[2px]"
                 : "bg-white border border-[#ebebeb] text-[#171717] rounded-bl-[2px] shadow-[0_1px_2px_rgba(0,0,0,0.02)]"
@@ -1536,8 +1536,8 @@ function MessageBubble({
             )}
             {msg.type === "text" ? (
               /* ── Text message ─────────────────────── */
-              <div className="flex items-start gap-2 p-3 sm:p-3.5">
-                <p className="whitespace-pre-wrap break-words flex-1">{msg.content}</p>
+              <div className="flex min-w-0 items-start gap-2 p-3 sm:p-3.5">
+                <p className="min-w-0 flex-1 whitespace-pre-wrap [overflow-wrap:anywhere]">{msg.content}</p>
                 <button
                   onClick={handleCopy}
                   title="Copy"
@@ -1559,32 +1559,34 @@ function MessageBubble({
             ) : isImage ? (
               /* ── Image preview ────────────────────── */
               <div style={{ maxWidth: 260 }}>
-                <img
-                  src={msg.fileUrl}
-                  alt={msg.content}
-                  className="w-full object-cover block"
-                  style={{ maxHeight: 300 }}
-                />
-                {msg.fileUrl && (
-                  <div className={cn(
-                    "flex items-center justify-between px-3 py-2",
-                    isMe ? "bg-white/10" : "bg-[#fafafa] border-t border-[#ebebeb]"
-                  )}>
-                    <span className={cn("font-mono text-[9px] uppercase truncate flex-1", isMe ? "text-white/60" : "text-[#8f8f8f]")}>
-                      {msg.content}
-                      {msg.fileSize ? ` · ${formatFileSize(msg.fileSize)}` : ""}
-                    </span>
+                <div className="relative">
+                  <img
+                    src={msg.fileUrl}
+                    alt={msg.content}
+                    className="block w-full object-cover"
+                    style={{ maxHeight: 300 }}
+                  />
+                  {msg.fileUrl && (
                     <a
                       href={msg.fileUrl}
                       download={msg.content}
-                      className={cn(
-                        "ml-2 p-1 rounded-[4px] transition-colors cursor-pointer",
-                        isMe ? "text-white/70 hover:text-white hover:bg-white/10" : "text-[#8f8f8f] hover:text-[#171717] hover:bg-[#ebebeb]"
-                      )}
-                      title="Download"
+                      className="absolute right-2.5 top-2.5 flex h-11 w-11 cursor-pointer items-center justify-center rounded-full border border-white/40 bg-black/65 text-white shadow-md backdrop-blur-sm transition-colors hover:bg-black/80 focus:outline-none focus:ring-2 focus:ring-white/90"
+                      aria-label={`Download ${msg.content}`}
+                      title="Download image"
                     >
-                      <Download size={12} />
+                      <Download size={19} />
                     </a>
+                  )}
+                </div>
+                {msg.fileUrl && (
+                  <div className={cn(
+                    "flex items-center px-3 py-2",
+                    isMe ? "bg-white/10" : "bg-[#fafafa] border-t border-[#ebebeb]"
+                  )}>
+                    <span className={cn("min-w-0 flex-1 truncate font-mono text-[9px] uppercase", isMe ? "text-white/60" : "text-[#8f8f8f]")}>
+                      {msg.content}
+                      {msg.fileSize ? ` · ${formatFileSize(msg.fileSize)}` : ""}
+                    </span>
                   </div>
                 )}
               </div>
