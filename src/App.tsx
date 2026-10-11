@@ -37,15 +37,21 @@ import { useNotification } from "./lib/useNotification";
 import { requestInvite, verifyOwnerPassword } from "./lib/partyApi";
 import {
   adminLogin,
+  buildDirectDownloadUrl,
+  buildSharePageUrl,
   createDownloadUrl,
   deleteAdminFile,
   deleteStoredFile,
   fileStorageConfigured,
+  getPublicShareInfo,
   listAdminFiles,
   listRoomFiles,
+  requestPublicDownloadUrl,
   updateAdminFile,
   updateStoredFile,
+  type PublicShareInfo,
   type StoredFile,
+  type UploadOptions,
 } from "./lib/fileApi";
 
 const STORAGE_KEY = "chatp2p_auth_token";
@@ -82,8 +88,15 @@ function VercelTriangle({ className = "w-4 h-4 text-[#171717]" }: { className?: 
 
 export default function App() {
   if (window.location.pathname === "/admin/storage") return <StorageAdminPage />;
+  const searchParams = new URLSearchParams(window.location.search);
+  const sharedFileId = searchParams.get("share")?.trim();
+  const sharedToken = searchParams.get("token")?.trim();
+  if (sharedFileId && sharedToken) {
+    return <PublicSharePage fileId={sharedFileId} token={sharedToken} />;
+  }
   return <ChatApp />;
 }
+
 
 function ChatApp() {
   const [password, setPassword] = useState("");
@@ -520,9 +533,21 @@ function ChatRoom({
   const dragCounter = useRef(0);
   const [showClearConfirm, setShowClearConfirm] = useState(false);
   const [showRoomFiles, setShowRoomFiles] = useState(false);
-  const [fileExpiryHours, setFileExpiryHours] = useState(24);
+  const [fileExpirySeconds, setFileExpirySeconds] = useState(24 * 3600);
+  const [fileMaxDownloads, setFileMaxDownloads] = useState<number>(0);
+  const [filePassword, setFilePassword] = useState("");
+  const [showUploadRules, setShowUploadRules] = useState(false);
   const [fileError, setFileError] = useState("");
   const prevMsgCount = useRef(messages.length);
+
+  const isRoomReady = status === "connected" || status === "waiting";
+
+  const currentUploadOptions = useCallback((): UploadOptions => ({
+    expirySeconds: fileExpirySeconds,
+    linkExpirySeconds: fileExpirySeconds,
+    maxDownloads: fileMaxDownloads > 0 ? fileMaxDownloads : null,
+    password: filePassword.trim() || null,
+  }), [fileExpirySeconds, fileMaxDownloads, filePassword]);
 
   // PWA install prompt
   const [pwaPrompt, setPwaPrompt] = useState<BeforeInstallPromptEvent | null>(null);
@@ -614,7 +639,7 @@ function ChatRoom({
 
   const handleSend = (e: React.FormEvent) => {
     e.preventDefault();
-    if (text.trim() && status === "connected") {
+    if (text.trim() && isRoomReady) {
       const replyTo: ReplyReference | undefined = replyingTo
         ? {
             messageId: replyingTo.id,
@@ -657,9 +682,9 @@ function ChatRoom({
   // Multiple files
   const handleFileChange = (e: React.ChangeEvent<HTMLInputElement>) => {
     const files = Array.from(e.target.files ?? []);
-    if (files.length > 0 && status === "connected") {
+    if (files.length > 0 && isRoomReady) {
       setFileError("");
-      sendFiles(files, fileExpiryHours).catch((error) => setFileError(error instanceof Error ? error.message : "File upload failed"));
+      sendFiles(files, currentUploadOptions()).catch((error) => setFileError(error instanceof Error ? error.message : "File upload failed"));
     }
     if (fileInputRef.current) fileInputRef.current.value = "";
   };
@@ -687,12 +712,12 @@ function ChatRoom({
       dragCounter.current = 0;
       setIsDragging(false);
       const files = Array.from(e.dataTransfer.files);
-      if (files.length > 0 && status === "connected") {
+      if (files.length > 0 && isRoomReady) {
         setFileError("");
-        sendFiles(files, fileExpiryHours).catch((error) => setFileError(error instanceof Error ? error.message : "File upload failed"));
+        sendFiles(files, currentUploadOptions()).catch((error) => setFileError(error instanceof Error ? error.message : "File upload failed"));
       }
     },
-    [status, sendFiles, fileExpiryHours]
+    [isRoomReady, sendFiles, currentUploadOptions]
   );
 
   // Active transfers
@@ -711,7 +736,7 @@ function ChatRoom({
       <div className="relative flex-1 w-full max-w-4xl mx-auto bg-white md:rounded-[12px] border border-[#ebebeb] shadow-[0_1px_2px_rgba(0,0,0,0.04)] flex flex-col min-h-0 overflow-hidden">
 
         {/* Drag & Drop overlay */}
-        {isDragging && status === "connected" && (
+        {isDragging && isRoomReady && (
           <div className="drag-overlay rounded-[12px]">
             <div className="p-4 bg-white/10 border border-white/20 rounded-[12px] flex flex-col items-center gap-3">
               <Upload size={32} className="text-white" />
@@ -754,7 +779,7 @@ function ChatRoom({
                 {status === "waiting" && (
                   <span className="hidden sm:flex font-mono text-[11px] px-2.5 py-0.5 rounded-full border border-amber-200 bg-amber-50 text-amber-700 items-center gap-1.5">
                     <span className="w-1.5 h-1.5 rounded-full bg-amber-500 animate-pulse" />
-                    <span>WAITING FOR PEER</span>
+                    <span>ROOM READY (1 PEER)</span>
                   </span>
                 )}
                 {status === "connecting" && (
@@ -940,14 +965,14 @@ function ChatRoom({
 
               <div className="space-y-1.5">
                 <h3 className="text-base font-semibold tracking-tight text-[#171717]">
-                  {status === "waiting" && "Waiting for Peer to Join"}
+                  {status === "waiting" && "Room Ready — Send Messages or Upload Files"}
                   {status === "connecting" && "Establishing Edge Connection..."}
                   {status === "disconnected" && "Peer Left Room"}
                   {status === "unauthorized" && "Invite Link Invalid"}
                 </h3>
                 <p className="text-xs text-[#4d4d4d] leading-relaxed">
                   {status === "waiting" &&
-                    "Share this link or QR code with your chat partner. Connection activates as soon as they open the link."}
+                    "You can drop files or post messages right away. Anyone joining via link sees messages sent while the room is occupied, and shared file links stay active until their expiry."}
                   {status === "connecting" &&
                     "Connecting to PartyKit relay server. Please hold on..."}
                   {status === "disconnected" &&
@@ -1050,6 +1075,58 @@ function ChatRoom({
               </button>
             </div>
           )}
+
+          {fileStorageConfigured() && showUploadRules && (
+            <div className="mb-2 grid grid-cols-1 sm:grid-cols-3 gap-2 rounded-[8px] border border-[#ebebeb] bg-[#fafafa] p-2.5">
+              <label className="font-mono text-[10px] uppercase text-[#4d4d4d] flex flex-col gap-1">
+                <span>Expire Time</span>
+                <select
+                  value={fileExpirySeconds}
+                  onChange={(event) => setFileExpirySeconds(Number(event.target.value))}
+                  className="rounded-[6px] border border-[#ebebeb] bg-white px-2 py-1.5 font-mono text-xs text-[#171717] outline-none focus:border-[#171717]"
+                >
+                  <option value={300}>5 minutes</option>
+                  <option value={900}>15 minutes</option>
+                  <option value={3600}>1 hour</option>
+                  <option value={21600}>6 hours</option>
+                  <option value={43200}>12 hours</option>
+                  <option value={86400}>24 hours</option>
+                  <option value={259200}>3 days</option>
+                  <option value={604800}>7 days</option>
+                </select>
+              </label>
+
+              <label className="font-mono text-[10px] uppercase text-[#4d4d4d] flex flex-col gap-1">
+                <span>Max Downloads</span>
+                <select
+                  value={fileMaxDownloads}
+                  onChange={(event) => setFileMaxDownloads(Number(event.target.value))}
+                  className="rounded-[6px] border border-[#ebebeb] bg-white px-2 py-1.5 font-mono text-xs text-[#171717] outline-none focus:border-[#171717]"
+                >
+                  <option value={0}>Unlimited</option>
+                  <option value={1}>1 download (Burn)</option>
+                  <option value={3}>3 downloads</option>
+                  <option value={5}>5 downloads</option>
+                  <option value={10}>10 downloads</option>
+                  <option value={25}>25 downloads</option>
+                  <option value={50}>50 downloads</option>
+                  <option value={100}>100 downloads</option>
+                </select>
+              </label>
+
+              <label className="font-mono text-[10px] uppercase text-[#4d4d4d] flex flex-col gap-1">
+                <span>File Password / PIN (Optional)</span>
+                <input
+                  type="password"
+                  value={filePassword}
+                  onChange={(event) => setFilePassword(event.target.value)}
+                  placeholder="No password"
+                  className="rounded-[6px] border border-[#ebebeb] bg-white px-2.5 py-1.5 font-mono text-xs text-[#171717] outline-none focus:border-[#171717]"
+                />
+              </label>
+            </div>
+          )}
+
           <form
             onSubmit={handleSend}
             className="flex items-center gap-2 rounded-[8px] border border-[#ebebeb] bg-white p-1.5 focus-within:border-[#171717] transition-colors"
@@ -1065,24 +1142,47 @@ function ChatRoom({
             <button
               type="button"
               onClick={() => fileInputRef.current?.click()}
-              disabled={status !== "connected" || (fileStorageConfigured() && !fileSessionToken)}
+              disabled={!isRoomReady || (fileStorageConfigured() && !fileSessionToken)}
               className="p-2 text-[#8f8f8f] hover:text-[#171717] transition-colors rounded-[6px] disabled:opacity-30 disabled:cursor-not-allowed cursor-pointer"
               title="Attach files (multiple supported)"
             >
               <Paperclip size={18} />
             </button>
             {fileStorageConfigured() && (
-              <select
-                value={fileExpiryHours}
-                onChange={(event) => setFileExpiryHours(Number(event.target.value))}
-                className="hidden sm:block rounded-[5px] border border-[#ebebeb] bg-[#fafafa] px-1.5 py-1 font-mono text-[10px] text-[#4d4d4d] outline-none"
-                title="File and link expiry"
-              >
-                <option value={1}>1h</option>
-                <option value={6}>6h</option>
-                <option value={12}>12h</option>
-                <option value={24}>24h</option>
-              </select>
+              <>
+                <select
+                  value={fileExpirySeconds}
+                  onChange={(event) => setFileExpirySeconds(Number(event.target.value))}
+                  className="hidden sm:block rounded-[5px] border border-[#ebebeb] bg-[#fafafa] px-1.5 py-1 font-mono text-[10px] text-[#4d4d4d] outline-none"
+                  title="File and link expiry"
+                >
+                  <option value={300}>5m</option>
+                  <option value={900}>15m</option>
+                  <option value={3600}>1h</option>
+                  <option value={21600}>6h</option>
+                  <option value={43200}>12h</option>
+                  <option value={86400}>24h</option>
+                  <option value={259200}>3d</option>
+                  <option value={604800}>7d</option>
+                </select>
+                <button
+                  type="button"
+                  onClick={() => setShowUploadRules((prev) => !prev)}
+                  className={cn(
+                    "rounded-[5px] border px-2 py-1 font-mono text-[10px] flex items-center gap-1 transition-colors cursor-pointer",
+                    showUploadRules || fileMaxDownloads > 0 || filePassword.trim()
+                      ? "border-[#171717] bg-[#171717] text-white"
+                      : "border-[#ebebeb] bg-[#fafafa] text-[#4d4d4d] hover:border-[#171717]"
+                  )}
+                  title="Configure file download limit & password"
+                >
+                  <Lock size={10} />
+                  <span className="hidden md:inline">
+                    {fileMaxDownloads > 0 ? `${fileMaxDownloads}dl` : "Rules"}
+                    {filePassword.trim() ? " · PIN" : ""}
+                  </span>
+                </button>
+              </>
             )}
             <input
               ref={textInputRef}
@@ -1096,16 +1196,16 @@ function ChatRoom({
                 }
               }}
               placeholder={
-                status === "connected"
-                  ? "Type a message..."
-                  : "Waiting for peer to connect..."
+                isRoomReady
+                  ? "Type a message or drop files..."
+                  : "Connecting to room..."
               }
-              disabled={status !== "connected"}
+              disabled={!isRoomReady}
               className="flex-1 bg-transparent border-none text-sm outline-none px-2 text-[#171717] placeholder:text-[#a1a1a1] disabled:opacity-40"
             />
             <button
               type="submit"
-              disabled={!text.trim() || status !== "connected"}
+              disabled={!text.trim() || !isRoomReady}
               className="h-8 w-8 rounded-[6px] bg-[#171717] hover:bg-black text-white flex items-center justify-center transition-colors disabled:opacity-30 disabled:cursor-not-allowed cursor-pointer shrink-0"
               title="Send message"
             >
@@ -1123,14 +1223,14 @@ function ChatRoom({
               "text-rose-600"
             )}>
               {status === "connected"   && `● CONNECTED (${peerCount} PEERS)`}
-              {status === "waiting"     && "● WAITING FOR PEER"}
+              {status === "waiting"     && "● ROOM READY (1 PEER)"}
               {status === "connecting"  && "● CONNECTING..."}
               {status === "disconnected" && "● DISCONNECTED"}
               {status === "unauthorized" && "● INVITE INVALID"}
             </span>
             {/* Desktop: security tagline */}
             <p className="hidden sm:block font-mono text-[10px] text-[#8f8f8f] tracking-wide">
-              TLS PROTECTED // NO SERVER MESSAGE HISTORY
+              EPHEMERAL ROOM // MESSAGES CLEAR WHEN EMPTY · SHARED FILE LINKS FOLLOW EXPIRY RULES
             </p>
           </div>
         </footer>
@@ -1157,6 +1257,11 @@ function timeRemaining(expiresAt: number | null): string {
   const minutes = Math.ceil(milliseconds / 60000);
   if (minutes < 60) return `${minutes}m left`;
   const hours = Math.floor(minutes / 60);
+  if (hours >= 48) {
+    const days = Math.floor(hours / 24);
+    const remHours = hours % 24;
+    return remHours ? `${days}d ${remHours}h left` : `${days}d left`;
+  }
   const rest = minutes % 60;
   return rest ? `${hours}h ${rest}m left` : `${hours}h left`;
 }
@@ -1166,6 +1271,9 @@ function RoomFilesPanel({ roomId, sessionToken, onClose }: { roomId: string; ses
   const [loading, setLoading] = useState(true);
   const [busyId, setBusyId] = useState<string | null>(null);
   const [error, setError] = useState("");
+  const [copiedId, setCopiedId] = useState<string | null>(null);
+  const [qrFileId, setQrFileId] = useState<string | null>(null);
+  const [passwordDrafts, setPasswordDrafts] = useState<Record<string, string>>({});
 
   const refresh = useCallback(async () => {
     setLoading(true);
@@ -1181,21 +1289,25 @@ function RoomFilesPanel({ roomId, sessionToken, onClose }: { roomId: string; ses
 
   useEffect(() => { void refresh(); }, [refresh]);
 
-  const changeExpiry = async (file: StoredFile, field: "file" | "link", hours: number) => {
-    if (!file.expiresAt || !file.linkExpiresAt) return;
+  const applyPatch = async (file: StoredFile, patch: Parameters<typeof updateStoredFile>[2]) => {
     setBusyId(file.id);
     try {
-      const next = Date.now() + hours * 60 * 60 * 1000;
-      const updated = field === "file"
-        ? await updateStoredFile(file.id, sessionToken, next, Math.min(file.linkExpiresAt, next))
-        : await updateStoredFile(file.id, sessionToken, file.expiresAt, hours === 0 ? Date.now() : Math.min(file.expiresAt, next));
+      const updated = await updateStoredFile(file.id, sessionToken, patch);
       setFiles((current) => current.map((item) => item.id === file.id ? updated : item));
       setError("");
     } catch (value) {
-      setError(value instanceof Error ? value.message : "Could not update expiry");
+      setError(value instanceof Error ? value.message : "Could not update file settings");
     } finally {
       setBusyId(null);
     }
+  };
+
+  const changeExpirySeconds = async (file: StoredFile, seconds: number) => {
+    const next = Date.now() + seconds * 1000;
+    await applyPatch(file, {
+      expiresAt: next,
+      linkExpiresAt: next,
+    });
   };
 
   const remove = async (file: StoredFile) => {
@@ -1221,10 +1333,23 @@ function RoomFilesPanel({ roomId, sessionToken, onClose }: { roomId: string; ses
       document.body.appendChild(anchor);
       anchor.click();
       anchor.remove();
+      void refresh();
     } catch (value) {
       setError(value instanceof Error ? value.message : "Could not create download link");
     } finally {
       setBusyId(null);
+    }
+  };
+
+  const copyShareUrl = async (file: StoredFile) => {
+    if (!file.shareToken) return;
+    const url = buildSharePageUrl(file.id, file.shareToken);
+    try {
+      await navigator.clipboard.writeText(url);
+      setCopiedId(file.id);
+      setTimeout(() => setCopiedId((prev) => (prev === file.id ? null : prev)), 2000);
+    } catch {
+      setError("Could not copy share link");
     }
   };
 
@@ -1233,14 +1358,17 @@ function RoomFilesPanel({ roomId, sessionToken, onClose }: { roomId: string; ses
       <section className="h-full w-full max-w-lg overflow-y-auto border-l border-[#ebebeb] bg-white shadow-xl">
         <header className="sticky top-0 z-10 flex h-14 items-center justify-between border-b border-[#ebebeb] bg-white px-5">
           <div>
-            <h2 className="text-sm font-semibold">Room files</h2>
-            <p className="font-mono text-[10px] text-[#8f8f8f]">ROOM {roomId.toUpperCase()} · MAX 24H</p>
+            <h2 className="text-sm font-semibold">Temporary Shared Files</h2>
+            <p className="font-mono text-[10px] text-[#8f8f8f]">ROOM {roomId.toUpperCase()} · UP TO 7 DAYS</p>
           </div>
-          <button onClick={onClose} className="rounded-[6px] p-2 text-[#8f8f8f] hover:bg-[#f2f2f2] hover:text-[#171717]" aria-label="Close room files"><X size={16} /></button>
+          <div className="flex items-center gap-1">
+            <button onClick={() => void refresh()} className="rounded-[6px] p-2 text-[#8f8f8f] hover:bg-[#f2f2f2] hover:text-[#171717]" title="Refresh stats"><RefreshCw size={14} /></button>
+            <button onClick={onClose} className="rounded-[6px] p-2 text-[#8f8f8f] hover:bg-[#f2f2f2] hover:text-[#171717]" aria-label="Close room files"><X size={16} /></button>
+          </div>
         </header>
         <div className="p-5">
           <div className="mb-4 rounded-[8px] border border-[#ebebeb] bg-[#fafafa] p-3 text-xs leading-relaxed text-[#4d4d4d]">
-            You can manage files you uploaded while this room session is active. The room owner can manage every file in the room.
+            Public share links remain active until their configured expiry or download limit even after everyone leaves the room.
           </div>
           {error && <p className="mb-4 flex items-center gap-2 rounded-[7px] bg-rose-50 px-3 py-2 text-xs text-rose-700"><AlertCircle size={13} />{error}</p>}
           {loading ? (
@@ -1249,37 +1377,364 @@ function RoomFilesPanel({ roomId, sessionToken, onClose }: { roomId: string; ses
             <div className="py-16 text-center"><FolderOpen className="mx-auto mb-3 text-[#b5b5b5]" size={28} /><p className="text-sm text-[#737373]">No stored files in this room</p></div>
           ) : (
             <div className="space-y-3">
-              {files.map((file) => (
-                <article key={file.id} className="rounded-[9px] border border-[#ebebeb] p-3.5">
-                  <div className="flex items-start gap-3">
-                    <div className="flex h-9 w-9 shrink-0 items-center justify-center rounded-[7px] bg-[#f5f5f5] text-[#4d4d4d]"><FileText size={17} /></div>
-                    <div className="min-w-0 flex-1">
-                      <p className="truncate text-xs font-semibold" title={file.name}>{file.name}</p>
-                      <p className="mt-1 font-mono text-[9px] uppercase text-[#8f8f8f]">{formatFileSize(file.size)} · {file.status} · {timeRemaining(file.expiresAt)}</p>
+              {files.map((file) => {
+                const linkRevoked = !file.linkExpiresAt || file.linkExpiresAt <= Date.now();
+                const limitReached = file.maxDownloads !== null && file.downloadCount >= file.maxDownloads;
+                const sharePageUrl = file.shareToken ? buildSharePageUrl(file.id, file.shareToken) : "";
+                return (
+                  <article key={file.id} className="rounded-[9px] border border-[#ebebeb] p-3.5 space-y-3">
+                    <div className="flex items-start gap-3">
+                      <div className="flex h-9 w-9 shrink-0 items-center justify-center rounded-[7px] bg-[#f5f5f5] text-[#4d4d4d]"><FileText size={17} /></div>
+                      <div className="min-w-0 flex-1">
+                        <div className="flex items-center gap-1.5">
+                          <p className="truncate text-xs font-semibold" title={file.name}>{file.name}</p>
+                          {file.hasPassword && <span className="shrink-0 rounded bg-amber-50 border border-amber-200 px-1.5 py-0.5 font-mono text-[9px] text-amber-800">PIN</span>}
+                        </div>
+                        <p className="mt-1 font-mono text-[9px] uppercase text-[#8f8f8f]">
+                          {formatFileSize(file.size)} · {timeRemaining(file.expiresAt)} · {file.downloadCount}{file.maxDownloads ? `/${file.maxDownloads}` : ""} DL
+                        </p>
+                        <p className="mt-0.5 font-mono text-[9px] text-[#8f8f8f]">
+                          {file.lastDownloadedAt ? `Last downloaded ${format(file.lastDownloadedAt, "HH:mm dd/MM")}` : "No downloads yet"}
+                          {linkRevoked ? " · LINK REVOKED" : limitReached ? " · LIMIT REACHED" : ""}
+                        </p>
+                      </div>
+                      <div className="flex items-center gap-1 shrink-0">
+                        {file.shareToken && !linkRevoked && !limitReached && (
+                          <>
+                            <button
+                              onClick={() => void copyShareUrl(file)}
+                              className="rounded-[6px] border border-[#ebebeb] px-2 py-1.5 font-mono text-[10px] text-[#171717] hover:border-[#171717] flex items-center gap-1 cursor-pointer"
+                              title="Copy public share link"
+                            >
+                              {copiedId === file.id ? <Check size={12} className="text-emerald-600" /> : <LinkIcon size={12} />}
+                              <span>{copiedId === file.id ? "Copied" : "Share"}</span>
+                            </button>
+                            <button
+                              onClick={() => setQrFileId((prev) => (prev === file.id ? null : file.id))}
+                              className="rounded-[6px] border border-[#ebebeb] p-1.5 text-[#4d4d4d] hover:border-[#171717] cursor-pointer"
+                              title="Show QR Code"
+                            >
+                              <Scan size={13} />
+                            </button>
+                          </>
+                        )}
+                        {file.status === "ready" && (
+                          <button
+                            disabled={busyId === file.id || limitReached}
+                            onClick={() => void download(file)}
+                            className="rounded-[6px] border border-[#ebebeb] p-1.5 text-[#4d4d4d] hover:border-[#171717] disabled:opacity-40 cursor-pointer"
+                            title="Download"
+                          >
+                            <Download size={14} />
+                          </button>
+                        )}
+                      </div>
                     </div>
-                    {file.status === "ready" && <button disabled={busyId === file.id} onClick={() => void download(file)} className="rounded-[6px] border border-[#ebebeb] p-2 text-[#4d4d4d] hover:border-[#171717] disabled:opacity-40" title="Download"><Download size={14} /></button>}
-                  </div>
-                  {file.canManage && (
-                    <div className="mt-3 grid grid-cols-[1fr_1fr_auto] gap-2 border-t border-[#f2f2f2] pt-3">
-                      <label className="text-[9px] font-mono uppercase text-[#8f8f8f]">File expiry
-                        <select disabled={busyId === file.id} defaultValue="" onChange={(event) => { if (event.target.value) void changeExpiry(file, "file", Number(event.target.value)); event.target.value = ""; }} className="mt-1 w-full rounded-[5px] border border-[#ebebeb] bg-white px-2 py-1.5 text-[10px] text-[#171717]">
-                          <option value="" disabled>Change</option><option value="1">1 hour</option><option value="6">6 hours</option><option value="12">12 hours</option><option value="24">Max 24h</option>
-                        </select>
-                      </label>
-                      <label className="text-[9px] font-mono uppercase text-[#8f8f8f]">Share link
-                        <select disabled={busyId === file.id} defaultValue="" onChange={(event) => { if (event.target.value !== "") void changeExpiry(file, "link", Number(event.target.value)); event.target.value = ""; }} className="mt-1 w-full rounded-[5px] border border-[#ebebeb] bg-white px-2 py-1.5 text-[10px] text-[#171717]">
-                          <option value="" disabled>Change</option><option value="0">Revoke now</option><option value="1">1 hour</option><option value="6">6 hours</option><option value="12">12 hours</option><option value="24">Max 24h</option>
-                        </select>
-                      </label>
-                      <button disabled={busyId === file.id} onClick={() => void remove(file)} className="mt-4 self-end rounded-[6px] border border-rose-200 p-2 text-rose-600 hover:bg-rose-50 disabled:opacity-40" title="Delete permanently"><Trash2 size={14} /></button>
-                    </div>
-                  )}
-                </article>
-              ))}
+
+                    {qrFileId === file.id && sharePageUrl && (
+                      <div className="flex flex-col items-center gap-2 rounded-[8px] border border-[#ebebeb] bg-[#fafafa] p-3">
+                        <div className="rounded-[6px] border border-[#ebebeb] bg-white p-2">
+                          <QRCodeSVG value={sharePageUrl} size={136} level="M" />
+                        </div>
+                        <p className="font-mono text-[9px] uppercase text-[#8f8f8f]">Public Share QR · No room login needed</p>
+                      </div>
+                    )}
+
+                    {file.canManage && (
+                      <div className="space-y-2.5 border-t border-[#f2f2f2] pt-3">
+                        <div className="grid grid-cols-2 sm:grid-cols-3 gap-2">
+                          <label className="text-[9px] font-mono uppercase text-[#8f8f8f]">Expire Time
+                            <select
+                              disabled={busyId === file.id}
+                              defaultValue=""
+                              onChange={(event) => {
+                                if (event.target.value) void changeExpirySeconds(file, Number(event.target.value));
+                                event.target.value = "";
+                              }}
+                              className="mt-1 w-full rounded-[5px] border border-[#ebebeb] bg-white px-2 py-1.5 text-[10px] text-[#171717]"
+                            >
+                              <option value="" disabled>Change TTL</option>
+                              <option value="300">5 mins</option>
+                              <option value="900">15 mins</option>
+                              <option value="3600">1 hour</option>
+                              <option value="21600">6 hours</option>
+                              <option value="43200">12 hours</option>
+                              <option value="86400">24 hours</option>
+                              <option value="259200">3 days</option>
+                              <option value="604800">7 days</option>
+                            </select>
+                          </label>
+
+                          <label className="text-[9px] font-mono uppercase text-[#8f8f8f]">Max Downloads
+                            <select
+                              disabled={busyId === file.id}
+                              value={file.maxDownloads ?? 0}
+                              onChange={(event) => {
+                                const val = Number(event.target.value);
+                                void applyPatch(file, { maxDownloads: val > 0 ? val : null });
+                              }}
+                              className="mt-1 w-full rounded-[5px] border border-[#ebebeb] bg-white px-2 py-1.5 text-[10px] text-[#171717]"
+                            >
+                              <option value={0}>Unlimited</option>
+                              <option value={1}>1 download</option>
+                              <option value={3}>3 downloads</option>
+                              <option value={5}>5 downloads</option>
+                              <option value={10}>10 downloads</option>
+                              <option value={25}>25 downloads</option>
+                              <option value={50}>50 downloads</option>
+                              <option value={100}>100 downloads</option>
+                            </select>
+                          </label>
+
+                          <div className="col-span-2 sm:col-span-1 flex items-end gap-1.5">
+                            {linkRevoked ? (
+                              <button
+                                disabled={busyId === file.id}
+                                onClick={() => void applyPatch(file, { rotateShareToken: true })}
+                                className="w-full rounded-[5px] border border-[#ebebeb] bg-[#fafafa] px-2 py-1.5 font-mono text-[10px] text-[#171717] hover:border-[#171717] cursor-pointer"
+                              >
+                                Enable Link
+                              </button>
+                            ) : (
+                              <button
+                                disabled={busyId === file.id}
+                                onClick={() => void applyPatch(file, { revokeLink: true })}
+                                className="w-full rounded-[5px] border border-amber-200 bg-amber-50 px-2 py-1.5 font-mono text-[10px] text-amber-800 hover:border-amber-400 cursor-pointer"
+                                title="Immediately disable public link"
+                              >
+                                Revoke Link
+                              </button>
+                            )}
+                            <button
+                              disabled={busyId === file.id}
+                              onClick={() => void remove(file)}
+                              className="rounded-[5px] border border-rose-200 p-1.5 text-rose-600 hover:bg-rose-50 disabled:opacity-40 cursor-pointer shrink-0"
+                              title="Delete permanently"
+                            >
+                              <Trash2 size={14} />
+                            </button>
+                          </div>
+                        </div>
+
+                        <div className="flex items-center gap-1.5">
+                          <input
+                            type="password"
+                            value={passwordDrafts[file.id] ?? ""}
+                            onChange={(event) => setPasswordDrafts((prev) => ({ ...prev, [file.id]: event.target.value }))}
+                            placeholder={file.hasPassword ? "Change PIN / password..." : "Set PIN / password..."}
+                            className="flex-1 rounded-[5px] border border-[#ebebeb] bg-white px-2.5 py-1 font-mono text-[10px] text-[#171717] outline-none focus:border-[#171717]"
+                          />
+                          <button
+                            type="button"
+                            disabled={busyId === file.id || !(passwordDrafts[file.id] ?? "").trim()}
+                            onClick={() => {
+                              const nextPwd = (passwordDrafts[file.id] ?? "").trim();
+                              if (!nextPwd) return;
+                              void applyPatch(file, { password: nextPwd });
+                              setPasswordDrafts((prev) => ({ ...prev, [file.id]: "" }));
+                            }}
+                            className="rounded-[5px] border border-[#ebebeb] bg-[#171717] px-2.5 py-1 font-mono text-[10px] text-white disabled:opacity-40 cursor-pointer"
+                          >
+                            Save PIN
+                          </button>
+                          {file.hasPassword && (
+                            <button
+                              type="button"
+                              disabled={busyId === file.id}
+                              onClick={() => void applyPatch(file, { password: null })}
+                              className="rounded-[5px] border border-[#ebebeb] px-2 py-1 font-mono text-[10px] text-[#737373] hover:border-[#171717] hover:text-[#171717] cursor-pointer"
+                            >
+                              Clear PIN
+                            </button>
+                          )}
+                        </div>
+                      </div>
+                    )}
+                  </article>
+                );
+              })}
             </div>
           )}
         </div>
       </section>
+    </div>
+  );
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Standalone Public File Share Page (?share=<fileId>&token=<token>)
+// ─────────────────────────────────────────────────────────────────────────────
+
+function PublicSharePage({ fileId, token }: { fileId: string; token: string }) {
+  const [info, setInfo] = useState<PublicShareInfo | null>(null);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState("");
+  const [password, setPassword] = useState("");
+  const [downloading, setDownloading] = useState(false);
+  const [showQr, setShowQr] = useState(false);
+
+  const loadInfo = useCallback(async () => {
+    setLoading(true);
+    try {
+      const data = await getPublicShareInfo(fileId, token);
+      setInfo(data);
+      setError("");
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Share link is invalid or unavailable");
+    } finally {
+      setLoading(false);
+    }
+  }, [fileId, token]);
+
+  useEffect(() => {
+    void loadInfo();
+  }, [loadInfo]);
+
+  const handleDownload = async (event?: React.FormEvent) => {
+    if (event) event.preventDefault();
+    if (!info) return;
+    setDownloading(true);
+    setError("");
+    try {
+      const grant = await requestPublicDownloadUrl(fileId, token, password || undefined);
+      const anchor = document.createElement("a");
+      anchor.href = grant.url;
+      anchor.download = info.name;
+      document.body.appendChild(anchor);
+      anchor.click();
+      anchor.remove();
+      setTimeout(() => void loadInfo(), 800);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Download failed");
+    } finally {
+      setDownloading(false);
+    }
+  };
+
+  const blocked = info ? (info.expired || info.limitReached) : false;
+
+  return (
+    <div className="relative min-h-[100dvh] w-screen bg-[#fafafa] text-[#171717] font-sans flex items-center justify-center p-4">
+      <div className="vercel-mesh-glow" />
+      <div className="relative z-10 w-full max-w-md rounded-[12px] border border-[#ebebeb] bg-white p-7 shadow-[0_1px_2px_rgba(0,0,0,0.04)] space-y-5">
+        <div className="flex items-center justify-between border-b border-[#ebebeb] pb-3">
+          <div className="flex items-center gap-2">
+            <VercelTriangle className="w-4 h-4 text-[#171717]" />
+            <span className="font-mono text-[11px] font-medium uppercase tracking-wider text-[#8f8f8f]">
+              Temporary File Share
+            </span>
+          </div>
+          {info && !blocked && (
+            <button
+              type="button"
+              onClick={() => setShowQr((prev) => !prev)}
+              className="rounded-[6px] border border-[#ebebeb] px-2 py-1 font-mono text-[10px] text-[#4d4d4d] hover:border-[#171717] flex items-center gap-1 cursor-pointer"
+            >
+              <Scan size={12} />
+              <span>{showQr ? "Hide QR" : "QR"}</span>
+            </button>
+          )}
+        </div>
+
+        {loading ? (
+          <div className="py-12 text-center font-mono text-xs text-[#8f8f8f]">VERIFYING SHARE LINK...</div>
+        ) : !info ? (
+          <div className="space-y-4 py-6 text-center">
+            <AlertCircle size={28} className="mx-auto text-rose-500" />
+            <p className="text-sm font-medium text-[#171717]">{error || "Share link unavailable"}</p>
+            <a href="/" className="inline-flex items-center gap-1.5 rounded-full border border-[#ebebeb] px-4 py-2 text-xs font-medium hover:border-[#171717]">
+              Go to ChatP2P
+            </a>
+          </div>
+        ) : (
+          <>
+            <div className="rounded-[10px] border border-[#ebebeb] bg-[#fafafa] p-4 space-y-2">
+              <div className="flex items-start gap-3">
+                <div className="flex h-10 w-10 shrink-0 items-center justify-center rounded-[8px] border border-[#ebebeb] bg-white text-[#171717]">
+                  <FileText size={20} />
+                </div>
+                <div className="min-w-0 flex-1">
+                  <h1 className="truncate text-sm font-semibold text-[#171717]" title={info.name}>
+                    {info.name}
+                  </h1>
+                  <p className="mt-0.5 font-mono text-[10px] uppercase text-[#8f8f8f]">
+                    {formatFileSize(info.size)} · {info.contentType}
+                  </p>
+                </div>
+              </div>
+
+              <div className="grid grid-cols-2 gap-2 pt-2 border-t border-[#ebebeb] font-mono text-[10px]">
+                <div>
+                  <span className="text-[#8f8f8f] block">EXPIRES IN</span>
+                  <span className={cn("font-semibold", info.expired ? "text-rose-600" : "text-[#171717]")}>
+                    {info.expired ? "Expired" : timeRemaining(info.expiresAt)}
+                  </span>
+                </div>
+                <div>
+                  <span className="text-[#8f8f8f] block">DOWNLOADS</span>
+                  <span className={cn("font-semibold", info.limitReached ? "text-rose-600" : "text-[#171717]")}>
+                    {info.downloadCount}{info.maxDownloads !== null ? ` / ${info.maxDownloads}` : " (Unlimited)"}
+                  </span>
+                </div>
+              </div>
+            </div>
+
+            {showQr && !blocked && (
+              <div className="flex flex-col items-center gap-2 rounded-[10px] border border-[#ebebeb] bg-[#fafafa] p-4">
+                <div className="rounded-[8px] border border-[#ebebeb] bg-white p-2.5">
+                  <QRCodeSVG value={window.location.href} size={150} level="M" />
+                </div>
+                <p className="font-mono text-[10px] uppercase text-[#8f8f8f]">Scan to open on another device</p>
+              </div>
+            )}
+
+            {blocked ? (
+              <div className="rounded-[8px] border border-rose-200 bg-rose-50 p-3 text-center text-xs text-rose-700">
+                {info.expired
+                  ? "This share link has expired or been revoked by the owner."
+                  : "This file has reached its maximum download limit."}
+              </div>
+            ) : (
+              <form onSubmit={handleDownload} className="space-y-3">
+                {info.requiresPassword && (
+                  <div className="space-y-1.5">
+                    <label className="font-mono text-[10px] uppercase tracking-wider text-[#4d4d4d] block">
+                      Password / PIN Required
+                    </label>
+                    <input
+                      type="password"
+                      value={password}
+                      onChange={(e) => setPassword(e.target.value)}
+                      placeholder="Enter file password"
+                      required
+                      autoFocus
+                      className="w-full rounded-[6px] border border-[#ebebeb] px-3 py-2 text-sm outline-none focus:border-[#171717]"
+                    />
+                  </div>
+                )}
+
+                {error && <p className="font-mono text-xs text-rose-600">{error}</p>}
+
+                <button
+                  type="submit"
+                  disabled={downloading || (info.requiresPassword && !password.trim())}
+                  className="w-full rounded-full bg-[#171717] hover:bg-black text-white py-2.5 px-4 text-sm font-medium flex items-center justify-center gap-2 transition-colors disabled:opacity-40 cursor-pointer"
+                >
+                  <Download size={16} />
+                  <span>{downloading ? "Preparing Download..." : "Download File"}</span>
+                </button>
+              </form>
+            )}
+
+            <div className="pt-2 border-t border-[#ebebeb] flex items-center justify-between text-xs text-[#8f8f8f]">
+              <a href="/" className="hover:text-[#171717] inline-flex items-center gap-1">
+                <ExternalLink size={12} /> Open ChatP2P
+              </a>
+              <span className="font-mono text-[10px]">CLOUDFLARE R2</span>
+            </div>
+          </>
+        )}
+      </div>
     </div>
   );
 }
@@ -1348,7 +1803,7 @@ function StorageAdminPage() {
 
   const keepToMax = async (file: StoredFile) => {
     if (file.status === "orphan") return;
-    const max = (file.uploadedAt || file.createdAt) + 24 * 60 * 60 * 1000;
+    const max = (file.uploadedAt || file.createdAt) + 7 * 24 * 60 * 60 * 1000;
     setBusyId(file.id);
     try {
       const updated = await updateAdminFile(file.id, token, max, max);
@@ -1393,16 +1848,36 @@ function StorageAdminPage() {
           <div className="rounded-[9px] border border-[#ebebeb] bg-white p-4"><AlertCircle size={16} className={orphanCount ? "text-amber-600" : "text-[#737373]"} /><p className="mt-3 text-xl font-semibold">{orphanCount}</p><p className="font-mono text-[9px] uppercase text-[#8f8f8f]">Orphan objects</p></div>
         </div>
         <div className="mt-5 overflow-hidden rounded-[10px] border border-[#ebebeb] bg-white">
-          <div className="flex flex-col gap-3 border-b border-[#ebebeb] p-4 sm:flex-row sm:items-center sm:justify-between"><div><h2 className="text-sm font-semibold">Bucket files</h2><p className="text-[10px] text-[#8f8f8f]">Keep extends only to the hard 24-hour limit.</p></div><input value={filter} onChange={(event) => setFilter(event.target.value)} placeholder="Filter name, room or status" className="w-full rounded-[6px] border border-[#ebebeb] px-3 py-2 text-xs outline-none focus:border-[#171717] sm:w-72" /></div>
+          <div className="flex flex-col gap-3 border-b border-[#ebebeb] p-4 sm:flex-row sm:items-center sm:justify-between"><div><h2 className="text-sm font-semibold">Bucket files</h2><p className="text-[10px] text-[#8f8f8f]">Manage expiry, download limits, and orphaned objects.</p></div><input value={filter} onChange={(event) => setFilter(event.target.value)} placeholder="Filter name, room or status" className="w-full rounded-[6px] border border-[#ebebeb] px-3 py-2 text-xs outline-none focus:border-[#171717] sm:w-72" /></div>
           {error && <p className="border-b border-[#ebebeb] bg-amber-50 px-4 py-2 text-xs text-amber-800">{error}</p>}
           {loading ? <div className="py-16 text-center font-mono text-xs text-[#8f8f8f]">LOADING BUCKET...</div> : (
             <div className="divide-y divide-[#f2f2f2]">
               {visible.map((file) => (
                 <div key={file.id} className="grid gap-3 p-4 sm:grid-cols-[minmax(0,2fr)_1fr_1fr_auto] sm:items-center">
-                  <div className="min-w-0"><p className="truncate text-xs font-semibold" title={file.name}>{file.name}</p><p className="mt-1 truncate font-mono text-[9px] text-[#8f8f8f]">{file.roomId ? `ROOM ${file.roomId}` : file.objectKey || "ORPHAN"}</p></div>
+                  <div className="min-w-0">
+                    <div className="flex items-center gap-1.5">
+                      <p className="truncate text-xs font-semibold" title={file.name}>{file.name}</p>
+                      {file.hasPassword && <span className="rounded bg-amber-50 border border-amber-200 px-1.5 py-0.5 font-mono text-[9px] text-amber-800">PIN</span>}
+                    </div>
+                    <p className="mt-1 truncate font-mono text-[9px] text-[#8f8f8f]">{file.roomId ? `ROOM ${file.roomId}` : file.objectKey || "ORPHAN"}</p>
+                  </div>
                   <div><p className="text-xs">{formatFileSize(file.size)}</p><p className="font-mono text-[9px] uppercase text-[#8f8f8f]">{file.status}</p></div>
-                  <div><p className="text-xs">{timeRemaining(file.expiresAt)}</p><p className="font-mono text-[9px] uppercase text-[#8f8f8f]">{file.downloadCount} downloads</p></div>
-                  <div className="flex gap-2">{file.status !== "orphan" && <button disabled={busyId === file.id} onClick={() => void keepToMax(file)} className="rounded-[6px] border border-[#ebebeb] px-2.5 py-1.5 text-[10px] hover:border-[#171717] disabled:opacity-40" title="Keep until the 24-hour maximum"><Clock3 size={12} className="mr-1 inline" />Keep</button>}<button disabled={busyId === file.id} onClick={() => void remove(file)} className="rounded-[6px] border border-rose-200 p-2 text-rose-600 hover:bg-rose-50 disabled:opacity-40" title="Delete"><Trash2 size={13} /></button></div>
+                  <div>
+                    <p className="text-xs">{timeRemaining(file.expiresAt)}</p>
+                    <p className="font-mono text-[9px] uppercase text-[#8f8f8f]">
+                      {file.downloadCount}{file.maxDownloads ? ` / ${file.maxDownloads}` : ""} downloads
+                    </p>
+                  </div>
+                  <div className="flex gap-2">
+                    {file.status !== "orphan" && (
+                      <button disabled={busyId === file.id} onClick={() => void keepToMax(file)} className="rounded-[6px] border border-[#ebebeb] px-2.5 py-1.5 text-[10px] hover:border-[#171717] disabled:opacity-40" title="Extend to 7-day maximum">
+                        <Clock3 size={12} className="mr-1 inline" />Keep
+                      </button>
+                    )}
+                    <button disabled={busyId === file.id} onClick={() => void remove(file)} className="rounded-[6px] border border-rose-200 p-2 text-rose-600 hover:bg-rose-50 disabled:opacity-40" title="Delete">
+                      <Trash2 size={13} />
+                    </button>
+                  </div>
                 </div>
               ))}
               {!visible.length && <div className="py-16 text-center text-sm text-[#8f8f8f]">No matching files</div>}
@@ -1439,14 +1914,28 @@ function MessageBubble({
 }) {
   const isMe = msg.isMe;
   const [copied, setCopied] = useState(false);
+  const [shareCopied, setShareCopied] = useState(false);
   const [showPicker, setShowPicker] = useState(false);
   const pickerRef = useRef<HTMLDivElement>(null);
+
+  const publicShareLink = msg.shareUrl || (msg.fileId && msg.shareToken ? buildSharePageUrl(msg.fileId, msg.shareToken) : "");
+  const downloadHref = msg.hasPassword && publicShareLink
+    ? publicShareLink
+    : (msg.fileUrl || (msg.fileId && msg.shareToken ? buildDirectDownloadUrl(msg.fileId, msg.shareToken) : ""));
 
   const handleCopy = () => {
     if (!msg.content) return;
     navigator.clipboard.writeText(msg.content);
     setCopied(true);
     setTimeout(() => setCopied(false), 2000);
+  };
+
+  const handleCopyShareLink = () => {
+    const link = publicShareLink || downloadHref;
+    if (!link) return;
+    navigator.clipboard.writeText(link);
+    setShareCopied(true);
+    setTimeout(() => setShareCopied(false), 2000);
   };
 
   // Close picker when clicking outside
@@ -1461,7 +1950,7 @@ function MessageBubble({
     return () => document.removeEventListener("mousedown", handler);
   }, [showPicker]);
 
-  const isImage = msg.type === "file" && msg.fileType?.startsWith("image/");
+  const isImage = msg.type === "file" && msg.fileType?.startsWith("image/") && !msg.hasPassword;
   const hasReactions = msgReactions && Object.keys(msgReactions).length > 0;
 
   return (
@@ -1561,14 +2050,14 @@ function MessageBubble({
               <div style={{ maxWidth: 260 }}>
                 <div className="relative">
                   <img
-                    src={msg.fileUrl}
+                    src={downloadHref}
                     alt={msg.content}
                     className="block w-full object-cover"
                     style={{ maxHeight: 300 }}
                   />
-                  {msg.fileUrl && (
+                  {downloadHref && (
                     <a
-                      href={msg.fileUrl}
+                      href={downloadHref}
                       download={msg.content}
                       className="absolute right-2.5 top-2.5 flex h-11 w-11 cursor-pointer items-center justify-center rounded-full border border-white/40 bg-black/65 text-white shadow-md backdrop-blur-sm transition-colors hover:bg-black/80 focus:outline-none focus:ring-2 focus:ring-white/90"
                       aria-label={`Download ${msg.content}`}
@@ -1578,15 +2067,26 @@ function MessageBubble({
                     </a>
                   )}
                 </div>
-                {msg.fileUrl && (
+                {downloadHref && (
                   <div className={cn(
-                    "flex items-center px-3 py-2",
+                    "flex items-center gap-2 px-3 py-2",
                     isMe ? "bg-white/10" : "bg-[#fafafa] border-t border-[#ebebeb]"
                   )}>
                     <span className={cn("min-w-0 flex-1 truncate font-mono text-[9px] uppercase", isMe ? "text-white/60" : "text-[#8f8f8f]")}>
                       {msg.content}
                       {msg.fileSize ? ` · ${formatFileSize(msg.fileSize)}` : ""}
+                      {msg.maxDownloads ? ` · MAX ${msg.maxDownloads} DL` : ""}
                     </span>
+                    {publicShareLink && (
+                      <button
+                        type="button"
+                        onClick={handleCopyShareLink}
+                        className={cn("font-mono text-[9px] uppercase px-1.5 py-0.5 rounded border cursor-pointer", isMe ? "border-white/25 text-white/80 hover:bg-white/10" : "border-[#d9d9d9] text-[#4d4d4d] hover:border-[#171717]")}
+                        title="Copy public share link"
+                      >
+                        {shareCopied ? "Copied" : "Link"}
+                      </button>
+                    )}
                   </div>
                 )}
               </div>
@@ -1597,29 +2097,49 @@ function MessageBubble({
                   "h-9 w-9 rounded-[4px] border flex items-center justify-center shrink-0",
                   isMe ? "bg-white/10 border-white/20 text-white" : "bg-white border-[#ebebeb] text-[#171717]"
                 )}>
-                  <FileText size={18} />
+                  {msg.hasPassword ? <Lock size={16} /> : <FileText size={18} />}
                 </div>
                 <div className="overflow-hidden pr-2 flex-1 min-w-0">
                   <p className={cn("text-xs font-semibold truncate max-w-[120px] sm:max-w-[180px]", isMe ? "text-white" : "text-[#171717]")}>
                     {msg.content}
                   </p>
                   <p className={cn("font-mono text-[9px] uppercase mt-0.5", isMe ? "text-white/60" : "text-[#8f8f8f]")}>
-                    {isMe ? "Sent" : "Received"}
-                    {msg.fileSize ? ` · ${formatFileSize(msg.fileSize)}` : ""}
+                    {msg.fileSize ? formatFileSize(msg.fileSize) : (isMe ? "Sent" : "Received")}
+                    {msg.expiresAt ? ` · ${timeRemaining(msg.expiresAt)}` : ""}
+                    {msg.maxDownloads ? ` · ${msg.maxDownloads} DL` : ""}
+                    {msg.hasPassword ? " · PIN" : ""}
                   </p>
                 </div>
-                {msg.fileUrl && (
-                  <a
-                    href={msg.fileUrl}
-                    download={msg.content}
-                    className={cn(
-                      "ml-auto px-2.5 py-1 rounded-[6px] font-mono text-xs font-medium flex items-center gap-1 shrink-0 transition-colors",
-                      isMe ? "bg-white text-[#171717] hover:bg-[#f2f2f2]" : "bg-[#171717] text-white hover:bg-black"
-                    )}
-                  >
-                    <Download size={12} />
-                  </a>
-                )}
+                <div className="ml-auto flex items-center gap-1 shrink-0">
+                  {publicShareLink && (
+                    <button
+                      type="button"
+                      onClick={handleCopyShareLink}
+                      title="Copy public share link"
+                      className={cn(
+                        "px-2 py-1 rounded-[6px] font-mono text-[10px] font-medium flex items-center gap-1 transition-colors cursor-pointer border",
+                        isMe ? "border-white/25 text-white hover:bg-white/10" : "border-[#ebebeb] text-[#171717] hover:border-[#171717]"
+                      )}
+                    >
+                      {shareCopied ? <Check size={11} /> : <LinkIcon size={11} />}
+                    </button>
+                  )}
+                  {downloadHref && (
+                    <a
+                      href={downloadHref}
+                      target={msg.hasPassword ? "_blank" : undefined}
+                      rel={msg.hasPassword ? "noreferrer" : undefined}
+                      download={msg.hasPassword ? undefined : msg.content}
+                      className={cn(
+                        "px-2.5 py-1 rounded-[6px] font-mono text-xs font-medium flex items-center gap-1 transition-colors",
+                        isMe ? "bg-white text-[#171717] hover:bg-[#f2f2f2]" : "bg-[#171717] text-white hover:bg-black"
+                      )}
+                      title={msg.hasPassword ? "Open share page to unlock & download" : "Download file"}
+                    >
+                      <Download size={12} />
+                    </a>
+                  )}
+                </div>
               </div>
             )}
           </div>
@@ -1731,3 +2251,4 @@ interface BeforeInstallPromptEvent extends Event {
   prompt: () => Promise<void>;
   userChoice: Promise<{ outcome: "accepted" | "dismissed" }>;
 }
+

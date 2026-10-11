@@ -120,4 +120,63 @@ describe("room invite authorization", () => {
     await firstServer.onConnect(newGuest as unknown as Party.Connection);
     assert.equal(newGuest.state?.authorized, true);
   });
+
+  it("retains messages and shared files sent by a solo user for late joiners, and clears history only when the room is empty", async () => {
+    const setup = makeRoom("solo-room");
+    const server = new ChatSignalingServer(setup.room);
+    const inv = await invite(server, "get");
+    const token = (await inv.json() as { invite: string }).invite;
+
+    // 1. Solo owner joins alone and sends a message + file-ready
+    const owner = new FakeConnection("owner-1", "solo-room", `auth=${PASSWORD}`);
+    setup.connections.push(owner);
+    await server.onConnect(owner as unknown as Party.Connection);
+
+    server.onMessage(JSON.stringify({ type: "peer-info", nickname: "Alice" }), owner as unknown as Party.Connection);
+    server.onMessage(JSON.stringify({
+      type: "chat-text",
+      id: "msg-1",
+      content: "Hello before anyone else joins!",
+      timestamp: 1000,
+    }), owner as unknown as Party.Connection);
+    server.onMessage(JSON.stringify({
+      type: "file-ready",
+      id: "file-1",
+      name: "report.pdf",
+      size: 2048,
+      fileType: "application/pdf",
+      fileUrl: "https://files.example.com/files/file-1/content?token=abc",
+      shareUrl: "https://chat.example.com/?share=file-1&token=abc",
+      shareToken: "abc",
+      maxDownloads: 5,
+      hasPassword: true,
+      expiresAt: 9999999,
+      linkExpiresAt: 9999999,
+      timestamp: 2000,
+    }), owner as unknown as Party.Connection);
+
+    // 2. Late guest joins and receives the buffered history
+    const guest = new FakeConnection("guest-1", "solo-room", `invite=${token}`);
+    setup.connections.push(guest);
+    await server.onConnect(guest as unknown as Party.Connection);
+
+    const joinedPayload = JSON.parse(guest.received[0] || "{}");
+    assert.equal(joinedPayload.type, "room-joined");
+    assert.equal(joinedPayload.numClients, 2);
+    assert.equal(joinedPayload.history.length, 2);
+    assert.equal(joinedPayload.history[0].content, "Hello before anyone else joins!");
+    assert.equal(joinedPayload.history[0].senderName, "Alice");
+    assert.equal(joinedPayload.history[1].name, "report.pdf");
+    assert.equal(joinedPayload.history[1].maxDownloads, 5);
+    assert.equal(joinedPayload.history[1].hasPassword, true);
+
+    // 3. Owner leaves, guest is still in the room -> history still preserved
+    await server.onClose(owner as unknown as Party.Connection);
+    assert.equal(server.history.length, 2);
+
+    // 4. Guest leaves -> room is now completely empty -> history wiped
+    await server.onClose(guest as unknown as Party.Connection);
+    assert.equal(server.history.length, 0);
+  });
 });
+

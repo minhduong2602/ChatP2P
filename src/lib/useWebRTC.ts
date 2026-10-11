@@ -2,7 +2,7 @@ import { useEffect, useRef, useState, useCallback } from "react";
 import PartySocket from "partysocket";
 import { v4 as uuidv4 } from "uuid";
 import { partyHost } from "./partyApi";
-import { fileStorageConfigured, uploadStoredFile } from "./fileApi";
+import { fileStorageConfigured, uploadStoredFile, type UploadOptions } from "./fileApi";
 
 export type Message = {
   id: string;
@@ -12,6 +12,10 @@ export type Message = {
   type: "text" | "file";
   content: string;
   fileUrl?: string;
+  shareUrl?: string;
+  shareToken?: string;
+  maxDownloads?: number | null;
+  hasPassword?: boolean;
   fileType?: string;
   fileSize?: number;
   fileId?: string;
@@ -30,9 +34,9 @@ export type ReplyReference = {
 
 export type ConnectionStatus =
   | "connecting" // Socket connecting to PartyKit
-  | "waiting" // In room, waiting for peer
-  | "connected" // Peer present, relay active
-  | "disconnected" // Peer left or error
+  | "waiting" // In room (1 peer), room active & ready to send/upload
+  | "connected" // 2+ peers present, relay active
+  | "disconnected" // Socket error/closed
   | "unauthorized"; // Invite revoked or invalid
 
 export type FileProgress = {
@@ -47,6 +51,25 @@ export type Reactions = Record<string, Record<string, number>>; // msgId → emo
 
 // File chunking constants for relay
 const CHUNK_SIZE = 32 * 1024; // 32 KB per chunk as base64 over WebSocket
+
+function sanitizeReply(rawReply: unknown): ReplyReference | undefined {
+  if (!rawReply || typeof rawReply !== "object") return undefined;
+  const candidate = rawReply as Partial<ReplyReference>;
+  if (
+    typeof candidate.messageId === "string" &&
+    typeof candidate.senderName === "string" &&
+    (candidate.type === "text" || candidate.type === "file") &&
+    typeof candidate.content === "string"
+  ) {
+    return {
+      messageId: candidate.messageId.slice(0, 100),
+      senderName: candidate.senderName.slice(0, 80),
+      type: candidate.type,
+      content: candidate.content.slice(0, 500),
+    };
+  }
+  return undefined;
+}
 
 export function useWebRTC(roomId: string | null, nickname: string, credential: { password?: string; invite?: string }) {
   const [status, setStatus] = useState<ConnectionStatus>("connecting");
@@ -79,13 +102,7 @@ export function useWebRTC(roomId: string | null, nickname: string, credential: {
   const incomingFilesRef = useRef<Record<string, IncomingFile>>({});
 
   const addMessage = useCallback((msg: Message) => {
-    setMessages((prev) => [...prev, msg]);
-  }, []);
-
-  const clearMessages = useCallback(() => {
-    setMessages([]);
-    setReactions({});
-    setFileSessionToken("");
+    setMessages((prev) => (prev.some((existing) => existing.id === msg.id) ? prev : [...prev, msg]));
   }, []);
 
   // Send a JSON message over the relay socket
@@ -98,6 +115,12 @@ export function useWebRTC(roomId: string | null, nickname: string, credential: {
 
   const sendRelayRef = useRef(sendRelay);
   sendRelayRef.current = sendRelay;
+
+  const clearMessages = useCallback(() => {
+    setMessages([]);
+    setReactions({});
+    sendRelayRef.current({ type: "clear-history" });
+  }, []);
 
   useEffect(() => {
     if (!roomId) return;
@@ -156,13 +179,62 @@ export function useWebRTC(roomId: string | null, nickname: string, credential: {
         // ── Connection management ──────────────────────────────
         case "room-joined": {
           const numClients = data.numClients as number;
-          myPeerIdRef.current = data.peerId as string;
+          const myId = data.peerId as string;
+          myPeerIdRef.current = myId;
           setFileSessionToken(typeof data.fileSessionToken === "string" ? data.fileSessionToken : "");
           setPeerCount(numClients);
           if (numClients >= 2) {
             setStatus("connected");
           } else {
             setStatus("waiting");
+          }
+          if (data.peers && typeof data.peers === "object") {
+            const initialPeers = { ...(data.peers as Record<string, string>) };
+            peersRef.current = initialPeers;
+            setPeers(initialPeers);
+          }
+          if (Array.isArray(data.history)) {
+            const hydrated: Message[] = [];
+            for (const item of data.history as Record<string, unknown>[]) {
+              const senderId = (item.senderId as string) || "unknown";
+              const senderName = (item.senderName as string) || peersRef.current[senderId] || "Unknown";
+              if (item.type === "chat-text" && typeof item.content === "string") {
+                hydrated.push({
+                  id: (item.id as string) || uuidv4(),
+                  senderId,
+                  isMe: senderId === myId,
+                  senderName,
+                  type: "text",
+                  content: item.content,
+                  timestamp: (item.timestamp as number) || Date.now(),
+                  replyTo: sanitizeReply(item.replyTo),
+                });
+              } else if (item.type === "file-ready" && typeof item.id === "string" && typeof item.name === "string") {
+                hydrated.push({
+                  id: item.id,
+                  senderId,
+                  isMe: senderId === myId,
+                  senderName,
+                  type: "file",
+                  content: item.name,
+                  fileId: item.id,
+                  fileUrl: item.fileUrl as string | undefined,
+                  shareUrl: item.shareUrl as string | undefined,
+                  shareToken: item.shareToken as string | undefined,
+                  maxDownloads: typeof item.maxDownloads === "number" ? item.maxDownloads : null,
+                  hasPassword: Boolean(item.hasPassword),
+                  fileType: (item.fileType as string) || "application/octet-stream",
+                  fileSize: item.size as number | undefined,
+                  expiresAt: item.expiresAt as number | undefined,
+                  linkExpiresAt: item.linkExpiresAt as number | undefined,
+                  timestamp: (item.timestamp as number) || Date.now(),
+                });
+              }
+            }
+            setMessages(hydrated);
+          }
+          if (data.reactions && typeof data.reactions === "object") {
+            setReactions(data.reactions as Reactions);
           }
           // Broadcast our info to the room
           sendRelayRef.current({ type: "peer-info", nickname });
@@ -225,30 +297,23 @@ export function useWebRTC(roomId: string | null, nickname: string, credential: {
         // ── Text message relay ─────────────────────────────────
         case "chat-text": {
           const senderId = data.senderId as string;
-          const rawReply = data.replyTo as Partial<ReplyReference> | undefined;
-          const replyTo =
-            rawReply &&
-            typeof rawReply.messageId === "string" &&
-            typeof rawReply.senderName === "string" &&
-            (rawReply.type === "text" || rawReply.type === "file") &&
-            typeof rawReply.content === "string"
-              ? {
-                  messageId: rawReply.messageId.slice(0, 100),
-                  senderName: rawReply.senderName.slice(0, 80),
-                  type: rawReply.type,
-                  content: rawReply.content.slice(0, 500),
-                }
-              : undefined;
+          const replyTo = sanitizeReply(data.replyTo);
           addMessage({
             id: (data.id as string) || uuidv4(),
             senderId,
             isMe: false,
-            senderName: peersRef.current[senderId] || "Unknown",
+            senderName: (data.senderName as string) || peersRef.current[senderId] || "Unknown",
             type: "text",
             content: data.content as string,
             timestamp: (data.timestamp as number) || Date.now(),
             replyTo,
           });
+          break;
+        }
+
+        case "clear-history": {
+          setMessages([]);
+          setReactions({});
           break;
         }
 
@@ -372,11 +437,15 @@ export function useWebRTC(roomId: string | null, nickname: string, credential: {
             id: data.id as string,
             senderId,
             isMe: false,
-            senderName: peersRef.current[senderId] || "Unknown",
+            senderName: (data.senderName as string) || peersRef.current[senderId] || "Unknown",
             type: "file",
             content: data.name as string,
             fileId: data.id as string,
             fileUrl: data.fileUrl as string,
+            shareUrl: data.shareUrl as string | undefined,
+            shareToken: data.shareToken as string | undefined,
+            maxDownloads: typeof data.maxDownloads === "number" ? data.maxDownloads : null,
+            hasPassword: Boolean(data.hasPassword),
             fileType: (data.fileType as string) || "application/octet-stream",
             fileSize: data.size as number,
             expiresAt: data.expiresAt as number,
@@ -398,12 +467,15 @@ export function useWebRTC(roomId: string | null, nickname: string, credential: {
     };
   }, [roomId, nickname, credential.password, credential.invite, addMessage]);
 
+  const isRoomActive = status === "connected" || status === "waiting";
+
   // ── sendMessage ──────────────────────────────────────────────
   const sendMessage = useCallback(
     (text: string, replyTo?: ReplyReference) => {
-      if (status !== "connected") return;
+      if (!isRoomActive) return;
       const id = uuidv4();
-      sendRelayRef.current({ type: "chat-text", id, content: text, timestamp: Date.now(), replyTo });
+      const timestamp = Date.now();
+      sendRelayRef.current({ type: "chat-text", id, senderName: nickname, content: text, timestamp, replyTo });
       addMessage({
         id,
         senderId: myPeerIdRef.current,
@@ -411,11 +483,11 @@ export function useWebRTC(roomId: string | null, nickname: string, credential: {
         senderName: nickname,
         type: "text",
         content: text,
-        timestamp: Date.now(),
+        timestamp,
         replyTo,
       });
     },
-    [status, nickname, addMessage]
+    [isRoomActive, nickname, addMessage]
   );
 
   // ── sendTyping (debounced — max 1 signal/second) ──────────────
@@ -431,7 +503,7 @@ export function useWebRTC(roomId: string | null, nickname: string, credential: {
   // ── sendReaction ─────────────────────────────────────────────
   const sendReaction = useCallback(
     (msgId: string, emoji: string) => {
-      if (status !== "connected") return;
+      if (!isRoomActive) return;
       sendRelayRef.current({ type: "reaction", msgId, emoji });
       // Optimistic local update
       setReactions((prev) => ({
@@ -442,13 +514,13 @@ export function useWebRTC(roomId: string | null, nickname: string, credential: {
         },
       }));
     },
-    [status]
+    [isRoomActive]
   );
 
-  // ── sendFile (chunked base64 relay with progress) ────────────
+  // ── sendFile (R2 storage or chunked base64 relay) ────────────
   const sendFile = useCallback(
-    async (file: File, expiryHours = 24) => {
-      if (status !== "connected") return;
+    async (file: File, optionsOrHours: number | UploadOptions = 24) => {
+      if (!isRoomActive) return;
 
       if (fileStorageConfigured()) {
         if (!fileSessionToken) throw new Error("File storage is not ready. Reconnect and try again.");
@@ -458,22 +530,28 @@ export function useWebRTC(roomId: string | null, nickname: string, credential: {
           [pendingId]: { name: file.name, progress: 0, direction: "upload", done: false },
         }));
         try {
-          const uploaded = await uploadStoredFile(roomId || "", fileSessionToken, file, expiryHours, (progress) => {
+          const uploaded = await uploadStoredFile(roomId || "", fileSessionToken, file, optionsOrHours, (progress) => {
             setTransferProgress((prev) => ({
               ...prev,
               [pendingId]: { ...prev[pendingId], progress },
             }));
           });
+          const timestamp = Date.now();
           const message = {
             type: "file-ready",
             id: uploaded.file.id,
+            senderName: nickname,
             name: uploaded.file.name,
             size: uploaded.file.size,
             fileType: uploaded.file.contentType,
             fileUrl: uploaded.downloadUrl,
+            shareUrl: uploaded.sharePageUrl,
+            shareToken: uploaded.shareToken,
+            maxDownloads: uploaded.file.maxDownloads,
+            hasPassword: uploaded.file.hasPassword,
             expiresAt: uploaded.file.expiresAt,
             linkExpiresAt: uploaded.file.linkExpiresAt,
-            timestamp: Date.now(),
+            timestamp,
           };
           sendRelayRef.current(message);
           addMessage({
@@ -485,11 +563,15 @@ export function useWebRTC(roomId: string | null, nickname: string, credential: {
             content: uploaded.file.name,
             fileId: uploaded.file.id,
             fileUrl: uploaded.downloadUrl,
+            shareUrl: uploaded.sharePageUrl,
+            shareToken: uploaded.shareToken,
+            maxDownloads: uploaded.file.maxDownloads,
+            hasPassword: uploaded.file.hasPassword,
             fileType: uploaded.file.contentType,
             fileSize: uploaded.file.size,
             expiresAt: uploaded.file.expiresAt || undefined,
             linkExpiresAt: uploaded.file.linkExpiresAt || undefined,
-            timestamp: Date.now(),
+            timestamp,
           });
           setTransferProgress((prev) => ({
             ...prev,
@@ -575,18 +657,18 @@ export function useWebRTC(roomId: string | null, nickname: string, credential: {
         });
       }, 3000);
     },
-    [status, nickname, addMessage, fileSessionToken, roomId]
+    [isRoomActive, nickname, addMessage, fileSessionToken, roomId]
   );
 
   // ── sendFiles (send multiple files sequentially) ─────────────
   const sendFiles = useCallback(
-    async (files: File[], expiryHours = 24) => {
+    async (files: File[], optionsOrHours: number | UploadOptions = 24) => {
       for (const file of files) {
-        if (status !== "connected") break;
-        await sendFile(file, expiryHours);
+        if (!isRoomActive) break;
+        await sendFile(file, optionsOrHours);
       }
     },
-    [status, sendFile]
+    [isRoomActive, sendFile]
   );
 
   // ── retryConnection (reconnect socket) ───────────────────────
@@ -616,3 +698,4 @@ export function useWebRTC(roomId: string | null, nickname: string, credential: {
     fileSessionToken,
   };
 }
+

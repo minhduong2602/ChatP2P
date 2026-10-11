@@ -1,7 +1,8 @@
 import type { D1Database, Env, ExecutionContextLike, R2UploadedPart } from "./types";
 
-const MAX_TTL_SECONDS = 24 * 60 * 60;
-const MIN_TTL_SECONDS = 15 * 60;
+const MAX_TTL_SECONDS = 7 * 24 * 60 * 60;
+const DEFAULT_TTL_SECONDS = 24 * 60 * 60;
+const MIN_TTL_SECONDS = 60;
 const PART_SIZE = 8 * 1024 * 1024;
 const MAX_FILE_SIZE = 10 * 1024 * 1024 * 1024;
 const ADMIN_SESSION_SECONDS = 8 * 60 * 60;
@@ -25,7 +26,10 @@ type FileRow = {
   uploader_session_id: string;
   upload_id: string | null;
   status: string;
+  share_token: string | null;
   share_token_hash: string;
+  password_hash: string | null;
+  max_downloads: number | null;
   created_at: number;
   uploaded_at: number | null;
   link_expires_at: number;
@@ -148,6 +152,19 @@ function clampTtl(value: unknown, fallback: number): number {
   return Math.min(MAX_TTL_SECONDS, Math.max(MIN_TTL_SECONDS, parsed));
 }
 
+function clampMaxDownloads(value: unknown): number | null {
+  if (value === null || value === undefined || value === "" || value === 0) return null;
+  const parsed = typeof value === "number" ? Math.floor(value) : typeof value === "string" ? Math.floor(Number(value)) : NaN;
+  if (!Number.isFinite(parsed) || parsed <= 0) return null;
+  return Math.min(100000, Math.max(1, parsed));
+}
+
+function normalizePassword(value: unknown): string | null {
+  if (typeof value !== "string") return null;
+  const trimmed = value.trim().slice(0, 128);
+  return trimmed.length > 0 ? trimmed : null;
+}
+
 async function fileById(db: D1Database, id: string): Promise<FileRow | null> {
   return db.prepare("SELECT * FROM files WHERE id = ?").bind(id).first<FileRow>();
 }
@@ -156,7 +173,7 @@ function canManage(file: FileRow, session: RoomSession): boolean {
   return file.room_id === session.room_id && (session.is_owner === 1 || file.uploader_session_id === session.session_id);
 }
 
-function publicFile(file: FileRow, session?: RoomSession | null) {
+function publicFile(file: FileRow, session?: RoomSession | null, includeShareToken = true) {
   return {
     id: file.id,
     roomId: file.room_id,
@@ -169,6 +186,9 @@ function publicFile(file: FileRow, session?: RoomSession | null) {
     linkExpiresAt: file.link_expires_at,
     expiresAt: file.expires_at,
     downloadCount: file.download_count,
+    maxDownloads: file.max_downloads ?? null,
+    hasPassword: !!file.password_hash,
+    shareToken: includeShareToken ? (file.share_token ?? null) : null,
     lastDownloadedAt: file.last_downloaded_at,
     canManage: session ? canManage(file, session) : false,
   };
@@ -186,6 +206,52 @@ async function deleteFile(env: Env, file: FileRow, actor: string): Promise<void>
     env.DB.prepare("INSERT INTO audit_logs (id, actor, action, file_id, object_key, created_at) VALUES (?, ?, 'delete', ?, ?, ?)")
       .bind(crypto.randomUUID(), actor, file.id, file.object_key, now),
   ]);
+}
+
+async function applyFilePatch(
+  env: Env,
+  file: FileRow,
+  body: {
+    expiresAt?: number;
+    linkExpiresAt?: number;
+    maxDownloads?: number | null;
+    password?: string | null;
+    revokeLink?: boolean;
+    rotateShareToken?: boolean;
+  }
+): Promise<FileRow> {
+  const absoluteMax = (file.uploaded_at || file.created_at) + MAX_TTL_SECONDS * 1000;
+  const expiresAt = Math.min(absoluteMax, Math.max(Date.now(), Number(body.expiresAt) || file.expires_at));
+  let linkExpiresAt = Math.min(expiresAt, Math.max(0, body.linkExpiresAt !== undefined ? Number(body.linkExpiresAt) : file.link_expires_at));
+  if (body.revokeLink) {
+    linkExpiresAt = Date.now();
+  }
+  let shareToken = file.share_token;
+  let shareTokenHash = file.share_token_hash;
+  if (body.rotateShareToken) {
+    shareToken = randomToken();
+    shareTokenHash = await sha256(shareToken);
+    if (linkExpiresAt <= Date.now()) linkExpiresAt = expiresAt;
+  }
+  const maxDownloads = "maxDownloads" in body ? clampMaxDownloads(body.maxDownloads) : (file.max_downloads ?? null);
+  let passwordHash = file.password_hash ?? null;
+  if ("password" in body) {
+    const normalized = normalizePassword(body.password);
+    passwordHash = normalized ? await sha256(normalized) : null;
+  }
+  await env.DB.prepare(
+    "UPDATE files SET expires_at = ?, link_expires_at = ?, max_downloads = ?, password_hash = ?, share_token = ?, share_token_hash = ? WHERE id = ?"
+  ).bind(expiresAt, linkExpiresAt, maxDownloads, passwordHash, shareToken, shareTokenHash, file.id).run();
+
+  return {
+    ...file,
+    expires_at: expiresAt,
+    link_expires_at: linkExpiresAt,
+    max_downloads: maxDownloads,
+    password_hash: passwordHash,
+    share_token: shareToken,
+    share_token_hash: shareTokenHash,
+  };
 }
 
 async function handleInternal(request: Request, env: Env, pathname: string, origin: string | null): Promise<Response> {
@@ -238,6 +304,9 @@ async function handleAdmin(request: Request, env: Env, pathname: string, origin:
       linkExpiresAt: null,
       expiresAt: null,
       downloadCount: 0,
+      maxDownloads: null,
+      hasPassword: false,
+      shareToken: null,
       lastDownloadedAt: null,
       canManage: true,
     }));
@@ -263,13 +332,85 @@ async function handleAdmin(request: Request, env: Env, pathname: string, origin:
   if (fileMatch && request.method === "PATCH") {
     const file = await fileById(env.DB, decodeURIComponent(fileMatch[1]));
     if (!file) return json({ error: "File not found" }, 404, origin);
-    const body = await request.json() as { expiresAt?: number; linkExpiresAt?: number };
-    const absoluteMax = (file.uploaded_at || file.created_at) + MAX_TTL_SECONDS * 1000;
-    const expiresAt = Math.min(absoluteMax, Math.max(Date.now(), Number(body.expiresAt) || file.expires_at));
-    const linkExpiresAt = Math.min(expiresAt, Math.max(Date.now(), Number(body.linkExpiresAt) || file.link_expires_at));
-    await env.DB.prepare("UPDATE files SET expires_at = ?, link_expires_at = ? WHERE id = ?").bind(expiresAt, linkExpiresAt, file.id).run();
-    return json({ file: publicFile({ ...file, expires_at: expiresAt, link_expires_at: linkExpiresAt }) }, 200, origin);
+    const body = await request.json() as {
+      expiresAt?: number;
+      linkExpiresAt?: number;
+      maxDownloads?: number | null;
+      password?: string | null;
+      revokeLink?: boolean;
+      rotateShareToken?: boolean;
+    };
+    const updated = await applyFilePatch(env, file, body);
+    return json({ file: { ...publicFile(updated), canManage: true } }, 200, origin);
   }
+  return json({ error: "Not found" }, 404, origin);
+}
+
+async function handlePublicShare(request: Request, env: Env, pathname: string, origin: string | null): Promise<Response> {
+  const infoMatch = pathname.match(/^\/public\/files\/([^/]+)$/);
+  if (infoMatch && request.method === "GET") {
+    const id = decodeURIComponent(infoMatch[1]);
+    const token = new URL(request.url).searchParams.get("token") || "";
+    const file = await fileById(env.DB, id);
+    if (!file || file.status !== "ready" || file.deleted_at) {
+      return json({ error: "File not found or deleted" }, 404, origin);
+    }
+    if (!token || !safeEqual(await sha256(token), file.share_token_hash)) {
+      return json({ error: "Invalid share token" }, 403, origin);
+    }
+    const now = Date.now();
+    const expired = file.expires_at <= now || file.link_expires_at <= now;
+    const limitReached = file.max_downloads !== null && file.max_downloads !== undefined && file.download_count >= file.max_downloads;
+    return json({
+      file: {
+        id: file.id,
+        name: file.original_name,
+        contentType: file.content_type,
+        size: file.size,
+        uploadedAt: file.uploaded_at || file.created_at,
+        expiresAt: Math.min(file.expires_at, file.link_expires_at),
+        downloadCount: file.download_count,
+        maxDownloads: file.max_downloads ?? null,
+        requiresPassword: !!file.password_hash,
+        expired,
+        limitReached,
+      },
+    }, 200, origin);
+  }
+
+  const accessMatch = pathname.match(/^\/public\/files\/([^/]+)\/access$/);
+  if (accessMatch && request.method === "POST") {
+    const id = decodeURIComponent(accessMatch[1]);
+    const file = await fileById(env.DB, id);
+    if (!file || file.status !== "ready" || file.deleted_at) {
+      return json({ error: "File not found or deleted" }, 404, origin);
+    }
+    const body = await request.json().catch(() => ({})) as { token?: string; password?: string };
+    const token = (body.token || new URL(request.url).searchParams.get("token") || "").trim();
+    if (!token || !safeEqual(await sha256(token), file.share_token_hash)) {
+      return json({ error: "Invalid share link" }, 403, origin);
+    }
+    const now = Date.now();
+    if (file.expires_at <= now || file.link_expires_at <= now) {
+      return json({ error: "Share link has expired" }, 410, origin);
+    }
+    if (file.max_downloads !== null && file.max_downloads !== undefined && file.download_count >= file.max_downloads) {
+      return json({ error: "Download limit reached" }, 410, origin);
+    }
+    if (file.password_hash) {
+      const supplied = normalizePassword(body.password);
+      if (!supplied || !safeEqual(await sha256(supplied), file.password_hash)) {
+        return json({ error: "Password required or incorrect", requiresPassword: true }, 401, origin);
+      }
+    }
+    const grantExpiry = Math.min(file.expires_at, file.link_expires_at, now + 10 * 60 * 1000);
+    const access = await signGrant(file.id, grantExpiry, env.FILE_API_SECRET);
+    return json({
+      url: `${new URL(request.url).origin}/files/${file.id}/content?access=${encodeURIComponent(access)}`,
+      expiresAt: grantExpiry,
+    }, 200, origin);
+  }
+
   return json({ error: "Not found" }, 404, origin);
 }
 
@@ -281,7 +422,7 @@ async function handleRoom(request: Request, env: Env, pathname: string, origin: 
     if (!session) return json({ error: "Room session expired" }, 401, origin);
     const rows = (await env.DB.prepare("SELECT * FROM files WHERE room_id = ? AND status != 'deleted' ORDER BY created_at DESC")
       .bind(roomId).all<FileRow>()).results || [];
-    return json({ files: rows.map((file) => publicFile(file, session)) }, 200, origin);
+    return json({ files: rows.map((file) => publicFile(file, session, true)) }, 200, origin);
   }
 
   const createUpload = pathname.match(/^\/rooms\/([^/]+)\/uploads$/);
@@ -289,25 +430,46 @@ async function handleRoom(request: Request, env: Env, pathname: string, origin: 
     const roomId = decodeURIComponent(createUpload[1]);
     const session = await roomSession(request, env, roomId);
     if (!session) return json({ error: "Room session expired" }, 401, origin);
-    const body = await request.json() as { name?: unknown; size?: unknown; contentType?: unknown; expiresInSeconds?: unknown; linkExpiresInSeconds?: unknown };
+    const body = await request.json() as {
+      name?: unknown;
+      size?: unknown;
+      contentType?: unknown;
+      expiresInSeconds?: unknown;
+      linkExpiresInSeconds?: unknown;
+      maxDownloads?: unknown;
+      password?: unknown;
+    };
     const name = validName(body.name);
     const size = Number(body.size);
     if (!name || !Number.isSafeInteger(size) || size <= 0 || size > MAX_FILE_SIZE) return json({ error: "Invalid file" }, 400, origin);
     const contentType = typeof body.contentType === "string" ? body.contentType.slice(0, 120) : "application/octet-stream";
-    const ttl = clampTtl(body.expiresInSeconds, MAX_TTL_SECONDS);
+    const ttl = clampTtl(body.expiresInSeconds, DEFAULT_TTL_SECONDS);
     const linkTtl = Math.min(ttl, clampTtl(body.linkExpiresInSeconds, ttl));
+    const maxDownloads = clampMaxDownloads(body.maxDownloads);
+    const normalizedPwd = normalizePassword(body.password);
+    const passwordHash = normalizedPwd ? await sha256(normalizedPwd) : null;
     const now = Date.now();
     const id = crypto.randomUUID();
     const objectKey = `${roomId}/${id}/${encodeURIComponent(name)}`;
     const shareToken = randomToken();
+    const shareTokenHash = await sha256(shareToken);
     const multipart = await env.FILES.createMultipartUpload(objectKey, {
       httpMetadata: { contentType },
       customMetadata: { fileId: id, roomId },
     });
     await env.DB.prepare(
-      "INSERT INTO files (id, room_id, object_key, original_name, content_type, size, uploader_session_id, upload_id, status, share_token_hash, created_at, uploaded_at, link_expires_at, expires_at, download_count) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'uploading', ?, ?, NULL, ?, ?, 0)"
-    ).bind(id, roomId, objectKey, name, contentType, size, session.session_id, multipart.uploadId, await sha256(shareToken), now, now + linkTtl * 1000, now + ttl * 1000).run();
-    return json({ fileId: id, uploadId: multipart.uploadId, partSize: PART_SIZE, shareToken, expiresAt: now + ttl * 1000, linkExpiresAt: now + linkTtl * 1000 }, 201, origin);
+      "INSERT INTO files (id, room_id, object_key, original_name, content_type, size, uploader_session_id, upload_id, status, share_token, share_token_hash, password_hash, max_downloads, created_at, uploaded_at, link_expires_at, expires_at, download_count) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'uploading', ?, ?, ?, ?, ?, NULL, ?, ?, 0)"
+    ).bind(id, roomId, objectKey, name, contentType, size, session.session_id, multipart.uploadId, shareToken, shareTokenHash, passwordHash, maxDownloads, now, now + linkTtl * 1000, now + ttl * 1000).run();
+    return json({
+      fileId: id,
+      uploadId: multipart.uploadId,
+      partSize: PART_SIZE,
+      shareToken,
+      expiresAt: now + ttl * 1000,
+      linkExpiresAt: now + linkTtl * 1000,
+      maxDownloads,
+      hasPassword: !!passwordHash,
+    }, 201, origin);
   }
 
   const partMatch = pathname.match(/^\/uploads\/([^/]+)\/parts\/(\d+)$/);
@@ -336,7 +498,7 @@ async function handleRoom(request: Request, env: Env, pathname: string, origin: 
     const linkExpiresAt = Math.min(file.link_expires_at, expiresAt);
     await env.DB.prepare("UPDATE files SET status = 'ready', uploaded_at = ?, upload_id = NULL, expires_at = ?, link_expires_at = ? WHERE id = ?")
       .bind(uploadedAt, expiresAt, linkExpiresAt, file.id).run();
-    return json({ file: publicFile({ ...file, status: "ready", uploaded_at: uploadedAt, upload_id: null, expires_at: expiresAt, link_expires_at: linkExpiresAt }) }, 200, origin);
+    return json({ file: publicFile({ ...file, status: "ready", uploaded_at: uploadedAt, upload_id: null, expires_at: expiresAt, link_expires_at: linkExpiresAt }, session, true) }, 200, origin);
   }
 
   const abortMatch = pathname.match(/^\/uploads\/([^/]+)$/);
@@ -357,12 +519,16 @@ async function handleRoom(request: Request, env: Env, pathname: string, origin: 
       await deleteFile(env, file, `room:${session.session_id}`);
       return json({ ok: true }, 200, origin);
     }
-    const body = await request.json() as { expiresAt?: number; linkExpiresAt?: number };
-    const absoluteMax = (file.uploaded_at || file.created_at) + MAX_TTL_SECONDS * 1000;
-    const expiresAt = Math.min(absoluteMax, Math.max(Date.now(), Number(body.expiresAt) || file.expires_at));
-    const linkExpiresAt = Math.min(expiresAt, Math.max(Date.now(), Number(body.linkExpiresAt) || file.link_expires_at));
-    await env.DB.prepare("UPDATE files SET expires_at = ?, link_expires_at = ? WHERE id = ?").bind(expiresAt, linkExpiresAt, file.id).run();
-    return json({ file: publicFile({ ...file, expires_at: expiresAt, link_expires_at: linkExpiresAt }, session) }, 200, origin);
+    const body = await request.json() as {
+      expiresAt?: number;
+      linkExpiresAt?: number;
+      maxDownloads?: number | null;
+      password?: string | null;
+      revokeLink?: boolean;
+      rotateShareToken?: boolean;
+    };
+    const updated = await applyFilePatch(env, file, body);
+    return json({ file: publicFile(updated, session, true) }, 200, origin);
   }
 
   const downloadLinkMatch = pathname.match(/^\/files\/([^/]+)\/download-link$/);
@@ -370,6 +536,9 @@ async function handleRoom(request: Request, env: Env, pathname: string, origin: 
     const file = await fileById(env.DB, decodeURIComponent(downloadLinkMatch[1]));
     const session = file ? await roomSession(request, env, file.room_id) : null;
     if (!file || !session || file.status !== "ready" || file.expires_at <= Date.now()) return json({ error: "File unavailable" }, 404, origin);
+    if (file.max_downloads !== null && file.max_downloads !== undefined && file.download_count >= file.max_downloads) {
+      return json({ error: "Download limit reached" }, 403, origin);
+    }
     const expiresAt = Math.min(file.expires_at, Date.now() + 10 * 60 * 1000);
     const access = await signGrant(file.id, expiresAt, env.FILE_API_SECRET);
     return json({ url: `${new URL(request.url).origin}/files/${file.id}/content?access=${encodeURIComponent(access)}`, expiresAt }, 200, origin);
@@ -377,41 +546,64 @@ async function handleRoom(request: Request, env: Env, pathname: string, origin: 
   return json({ error: "Not found" }, 404, origin);
 }
 
-async function handleDownload(request: Request, env: Env, id: string): Promise<Response> {
+async function handleDownload(request: Request, env: Env, id: string, origin: string | null): Promise<Response> {
   const file = await fileById(env.DB, id);
-  if (!file || file.status !== "ready" || file.deleted_at || file.expires_at <= Date.now()) return json({ error: "File unavailable" }, 404);
-  const token = new URL(request.url).searchParams.get("token") || "";
-  const access = new URL(request.url).searchParams.get("access") || "";
+  if (!file || file.status !== "ready" || file.deleted_at || file.expires_at <= Date.now()) return json({ error: "File unavailable" }, 404, origin);
+  if (file.max_downloads !== null && file.max_downloads !== undefined && file.download_count >= file.max_downloads) {
+    return json({ error: "Download limit reached" }, 403, origin);
+  }
+  const url = new URL(request.url);
+  const token = url.searchParams.get("token") || "";
+  const access = url.searchParams.get("access") || "";
+  const password = url.searchParams.get("password") || "";
   const session = await roomSession(request, env, file.room_id);
-  const shared = token && file.link_expires_at > Date.now() && safeEqual(await sha256(token), file.share_token_hash);
+  const tokenValid = token && file.link_expires_at > Date.now() && safeEqual(await sha256(token), file.share_token_hash);
+  const passwordOk = !file.password_hash || (Boolean(password) && safeEqual(await sha256(password), file.password_hash));
+  const shared = tokenValid && passwordOk;
   const granted = access && await verifyGrant(access, file.id, env.FILE_API_SECRET);
-  if (!session && !shared && !granted) return json({ error: "Link expired or access denied" }, 403);
-  const object = await env.FILES.get(file.object_key, { range: request.headers });
-  if (!object) return json({ error: "File unavailable" }, 404);
+  if (!session && !shared && !granted) {
+    if (tokenValid && file.password_hash && !passwordOk) {
+      return json({ error: "Password required to download this file", requiresPassword: true }, 401, origin);
+    }
+    return json({ error: "Link expired or access denied" }, 403, origin);
+  }
   const isRangeRequest = request.headers.has("Range");
-  const headers = new Headers({ "Accept-Ranges": "bytes", "Content-Disposition": `attachment; filename*=UTF-8''${encodeURIComponent(file.original_name)}` });
+  if (!isRangeRequest) {
+    const updateResult = await env.DB.prepare(
+      "UPDATE files SET download_count = download_count + 1, last_downloaded_at = ? WHERE id = ? AND (max_downloads IS NULL OR download_count < max_downloads)"
+    ).bind(Date.now(), file.id).run();
+    const changes = (updateResult as { meta?: { changes?: number } }).meta?.changes;
+    if (changes === 0 && file.max_downloads !== null) {
+      return json({ error: "Download limit reached" }, 403, origin);
+    }
+  }
+  const object = await env.FILES.get(file.object_key, { range: request.headers });
+  if (!object) return json({ error: "File unavailable" }, 404, origin);
+  const headers = new Headers({
+    ...baseHeaders(origin),
+    "Accept-Ranges": "bytes",
+    "Content-Disposition": `attachment; filename*=UTF-8''${encodeURIComponent(file.original_name)}`,
+  });
   object.writeHttpMetadata(headers);
   headers.set("ETag", object.httpEtag);
   if (isRangeRequest && object.range && "offset" in object.range) {
     headers.set("Content-Range", `bytes ${object.range.offset}-${object.range.offset + object.range.length - 1}/${file.size}`);
     headers.set("Content-Length", String(object.range.length));
   } else {
-    headers.set("Content-Length", String(object.size));
+    headers.set("Content-Length", String(file.size));
   }
-  env.DB.prepare("UPDATE files SET download_count = download_count + 1, last_downloaded_at = ? WHERE id = ?")
-    .bind(Date.now(), file.id).run().catch(() => undefined);
   return new Response(object.body, { status: isRangeRequest ? 206 : 200, headers });
 }
 
 async function cleanup(env: Env): Promise<void> {
   const now = Date.now();
   const rows = (await env.DB.prepare(
-    "SELECT * FROM files WHERE status != 'deleted' AND (expires_at <= ? OR (status = 'uploading' AND created_at <= ?)) LIMIT 100"
+    "SELECT * FROM files WHERE status != 'deleted' AND (expires_at <= ? OR (max_downloads IS NOT NULL AND download_count >= max_downloads) OR (status = 'uploading' AND created_at <= ?)) LIMIT 100"
   ).bind(now, now - 3 * 60 * 60 * 1000).all<FileRow>()).results || [];
   await Promise.all(rows.map((file) => deleteFile(env, file, "cron")));
   await env.DB.batch([
     env.DB.prepare("DELETE FROM admin_sessions WHERE expires_at <= ?").bind(now),
-    env.DB.prepare("DELETE FROM room_sessions WHERE expires_at <= ? OR (active = 0 AND updated_at <= ?)").bind(now, now - MAX_TTL_SECONDS * 1000),
+    env.DB.prepare("DELETE FROM room_sessions WHERE expires_at <= ? OR (active = 0 AND updated_at <= ?)").bind(now, now - DEFAULT_TTL_SECONDS * 1000),
   ]);
 }
 
@@ -424,8 +616,9 @@ export default {
     try {
       if (url.pathname.startsWith("/internal/")) return await handleInternal(request, env, url.pathname, origin);
       if (url.pathname.startsWith("/admin/")) return await handleAdmin(request, env, url.pathname, origin);
+      if (url.pathname.startsWith("/public/")) return await handlePublicShare(request, env, url.pathname, origin);
       const download = url.pathname.match(/^\/files\/([^/]+)\/content$/);
-      if (download && request.method === "GET") return await handleDownload(request, env, decodeURIComponent(download[1]));
+      if (download && request.method === "GET") return await handleDownload(request, env, decodeURIComponent(download[1]), origin);
       return await handleRoom(request, env, url.pathname, origin);
     } catch (error) {
       console.error("file-api", error);
@@ -437,3 +630,4 @@ export default {
     await cleanup(env);
   },
 };
+

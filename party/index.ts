@@ -54,8 +54,39 @@ async function sha256(value: string): Promise<string> {
   return Array.from(new Uint8Array(digest), (byte) => byte.toString(16).padStart(2, "0")).join("");
 }
 
+type StoredRoomMessage = {
+  type: "chat-text" | "file-ready";
+  id: string;
+  senderId: string;
+  senderName?: string;
+  content?: string;
+  name?: string;
+  size?: number;
+  fileType?: string;
+  fileUrl?: string;
+  shareUrl?: string;
+  shareToken?: string;
+  maxDownloads?: number | null;
+  hasPassword?: boolean;
+  expiresAt?: number;
+  linkExpiresAt?: number;
+  timestamp: number;
+  replyTo?: {
+    messageId: string;
+    senderName: string;
+    type: "text" | "file";
+    content: string;
+  };
+};
+
+const MAX_ROOM_HISTORY = 500;
+
 /** Relay for a room. Password authenticates owners; a room-bound invite authenticates guests. */
 export default class ChatSignalingServer implements Party.Server {
+  history: StoredRoomMessage[] = [];
+  reactions: Record<string, Record<string, number>> = {};
+  peerNames = new Map<string, string>();
+
   constructor(readonly room: Party.Room) {}
 
   static async onFetch(req: Request, lobby: Party.FetchLobby) {
@@ -121,7 +152,7 @@ export default class ChatSignalingServer implements Party.Server {
       return;
     }
 
-    const connections = [...this.room.getConnections()].filter((peer) => (peer.state as { authorized?: boolean } | null)?.authorized);
+    const connections = [...this.room.getConnections()].filter((peer) => peer.id !== conn.id && (peer.state as { authorized?: boolean } | null)?.authorized);
     if (connections.length >= 50) {
       conn.send(JSON.stringify({ type: "room-full" }));
       conn.close(4000, "room-full");
@@ -151,7 +182,19 @@ export default class ChatSignalingServer implements Party.Server {
     }
     conn.setState({ authorized: true, owner, fileSession: !!fileSessionToken });
     const numClients = connections.length + 1;
-    conn.send(JSON.stringify({ type: "room-joined", numClients, peerId: conn.id, fileSessionToken }));
+    const peersSnapshot: Record<string, string> = {};
+    for (const [peerId, name] of this.peerNames.entries()) {
+      if (peerId !== conn.id) peersSnapshot[peerId] = name;
+    }
+    conn.send(JSON.stringify({
+      type: "room-joined",
+      numClients,
+      peerId: conn.id,
+      fileSessionToken,
+      history: this.history,
+      reactions: this.reactions,
+      peers: peersSnapshot,
+    }));
     if (numClients >= 2) {
       for (const peer of connections) {
         if (peer.id !== conn.id) peer.send(JSON.stringify({ type: "peer-joined", peerId: conn.id }));
@@ -162,8 +205,56 @@ export default class ChatSignalingServer implements Party.Server {
   onMessage(message: string, sender: Party.Connection) {
     if (!(sender.state as { authorized?: boolean } | null)?.authorized) return;
     try {
-      const data = JSON.parse(message);
+      const data = JSON.parse(message) as Record<string, unknown>;
       data.senderId = sender.id;
+
+      if (data.type === "peer-info" && typeof data.nickname === "string") {
+        const cleanName = data.nickname.trim().slice(0, 60);
+        if (cleanName) this.peerNames.set(sender.id, cleanName);
+      } else if (data.type === "chat-text" && typeof data.content === "string") {
+        const senderName = (typeof data.senderName === "string" && data.senderName.trim()) || this.peerNames.get(sender.id) || "Unknown";
+        data.senderName = senderName;
+        this.history.push({
+          type: "chat-text",
+          id: typeof data.id === "string" ? data.id : crypto.randomUUID(),
+          senderId: sender.id,
+          senderName,
+          content: data.content,
+          timestamp: typeof data.timestamp === "number" ? data.timestamp : Date.now(),
+          replyTo: data.replyTo as StoredRoomMessage["replyTo"],
+        });
+        if (this.history.length > MAX_ROOM_HISTORY) this.history.shift();
+      } else if (data.type === "file-ready" && typeof data.id === "string" && typeof data.name === "string") {
+        const senderName = (typeof data.senderName === "string" && data.senderName.trim()) || this.peerNames.get(sender.id) || "Unknown";
+        data.senderName = senderName;
+        this.history.push({
+          type: "file-ready",
+          id: data.id,
+          senderId: sender.id,
+          senderName,
+          name: data.name,
+          size: typeof data.size === "number" ? data.size : undefined,
+          fileType: typeof data.fileType === "string" ? data.fileType : "application/octet-stream",
+          fileUrl: typeof data.fileUrl === "string" ? data.fileUrl : undefined,
+          shareUrl: typeof data.shareUrl === "string" ? data.shareUrl : undefined,
+          shareToken: typeof data.shareToken === "string" ? data.shareToken : undefined,
+          maxDownloads: typeof data.maxDownloads === "number" ? data.maxDownloads : null,
+          hasPassword: Boolean(data.hasPassword),
+          expiresAt: typeof data.expiresAt === "number" ? data.expiresAt : undefined,
+          linkExpiresAt: typeof data.linkExpiresAt === "number" ? data.linkExpiresAt : undefined,
+          timestamp: typeof data.timestamp === "number" ? data.timestamp : Date.now(),
+        });
+        if (this.history.length > MAX_ROOM_HISTORY) this.history.shift();
+      } else if (data.type === "reaction" && typeof data.msgId === "string" && typeof data.emoji === "string") {
+        const msgId = data.msgId;
+        const emoji = data.emoji;
+        if (!this.reactions[msgId]) this.reactions[msgId] = {};
+        this.reactions[msgId][emoji] = (this.reactions[msgId][emoji] || 0) + 1;
+      } else if (data.type === "clear-history") {
+        this.history = [];
+        this.reactions = {};
+      }
+
       for (const peer of this.room.getConnections()) {
         if (peer.id !== sender.id && (peer.state as { authorized?: boolean } | null)?.authorized) {
           peer.send(JSON.stringify(data));
@@ -176,6 +267,9 @@ export default class ChatSignalingServer implements Party.Server {
 
   async onClose(conn: Party.Connection) {
     if (!(conn.state as { authorized?: boolean } | null)?.authorized) return;
+    conn.setState({ authorized: false });
+    this.peerNames.delete(conn.id);
+
     const fileApi = fileApiConfig(this.room.env);
     if (fileApi && (conn.state as { fileSession?: boolean } | null)?.fileSession) {
       try {
@@ -187,10 +281,18 @@ export default class ChatSignalingServer implements Party.Server {
         console.error("[PartyKit] File API session revocation failed", error);
       }
     }
-    for (const peer of this.room.getConnections()) {
-      if (peer.id !== conn.id && (peer.state as { authorized?: boolean } | null)?.authorized) {
-        peer.send(JSON.stringify({ type: "peer-disconnected", peerId: conn.id }));
-      }
+
+    const remainingPeers = [...this.room.getConnections()].filter(
+      (peer) => peer.id !== conn.id && (peer.state as { authorized?: boolean } | null)?.authorized
+    );
+    for (const peer of remainingPeers) {
+      peer.send(JSON.stringify({ type: "peer-disconnected", peerId: conn.id }));
+    }
+
+    if (remainingPeers.length === 0) {
+      this.history = [];
+      this.reactions = {};
+      this.peerNames.clear();
     }
   }
 
@@ -198,3 +300,4 @@ export default class ChatSignalingServer implements Party.Server {
     console.error(`[PartyKit] conn ${conn.id} error:`, err.message);
   }
 }
+
