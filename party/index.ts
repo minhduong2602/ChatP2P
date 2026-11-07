@@ -1,4 +1,11 @@
-import type * as Party from "partykit/server";
+/// <reference types="@cloudflare/workers-types" />
+import {
+  Server,
+  routePartykitRequest,
+  type Connection,
+  type ConnectionContext,
+  type WSMessage,
+} from "partyserver";
 
 const INVITE_KEY = "invite-token";
 
@@ -9,11 +16,11 @@ function appPassword(env: Record<string, unknown>): string {
 function allowedOrigin(req: { headers: { get(name: string): string | null } }, env: Record<string, unknown>): string | null {
   const origin = req.headers.get("Origin");
   if (!origin) return null;
+  if (/^https?:\/\/localhost(?::\d+)?$/.test(origin)) return origin;
+  if (/^https?:\/\/127\.0\.0\.1(?::\d+)?$/.test(origin)) return origin;
   const configured = typeof env.APP_URL === "string" ? env.APP_URL : "";
   try {
     if (configured && origin === new URL(configured).origin) return origin;
-    if (!configured && /^https?:\/\/localhost(?::\d+)?$/.test(origin)) return origin;
-    if (!configured && /^https?:\/\/127\.0\.0\.1(?::\d+)?$/.test(origin)) return origin;
   } catch {
     return null;
   }
@@ -22,7 +29,12 @@ function allowedOrigin(req: { headers: { get(name: string): string | null } }, e
 
 function corsHeaders(origin: string | null): HeadersInit {
   return origin
-    ? { "Access-Control-Allow-Origin": origin, "Access-Control-Allow-Methods": "POST, OPTIONS", "Access-Control-Allow-Headers": "Content-Type", Vary: "Origin" }
+    ? {
+        "Access-Control-Allow-Origin": origin,
+        "Access-Control-Allow-Methods": "POST, OPTIONS",
+        "Access-Control-Allow-Headers": "Content-Type",
+        Vary: "Origin",
+      }
     : {};
 }
 
@@ -54,7 +66,7 @@ async function sha256(value: string): Promise<string> {
   return Array.from(new Uint8Array(digest), (byte) => byte.toString(16).padStart(2, "0")).join("");
 }
 
-type StoredRoomMessage = {
+export type StoredRoomMessage = {
   type: "chat-text" | "file-ready";
   id: string;
   senderId: string;
@@ -81,50 +93,28 @@ type StoredRoomMessage = {
 
 const MAX_ROOM_HISTORY = 500;
 
+export interface RelayEnv {
+  APP_PASSWORD?: string;
+  APP_URL?: string;
+  FILE_API_URL?: string;
+  FILE_API_SECRET?: string;
+  ChatSignalingServer: DurableObjectNamespace<ChatSignalingServer>;
+  main?: DurableObjectNamespace<ChatSignalingServer>;
+  [key: string]: unknown;
+}
+
 /** Relay for a room. Password authenticates owners; a room-bound invite authenticates guests. */
-export default class ChatSignalingServer implements Party.Server {
+export class ChatSignalingServer extends Server<RelayEnv> {
   history: StoredRoomMessage[] = [];
   reactions: Record<string, Record<string, number>> = {};
   peerNames = new Map<string, string>();
 
-  constructor(readonly room: Party.Room) {}
-
-  static async onFetch(req: Request, lobby: Party.FetchLobby) {
-    if (new URL(req.url).pathname !== "/auth/verify") return null;
-    const origin = allowedOrigin(req, lobby.env);
-    if (req.method === "OPTIONS") {
-      return origin ? new Response(null, { status: 204, headers: corsHeaders(origin) }) : new Response("Forbidden", { status: 403 });
-    }
-    if (req.method !== "POST" || !origin) return json({ error: "Forbidden" }, 403, origin);
-    const expected = appPassword(lobby.env);
-    const supplied = await req.text();
-    return expected && supplied === expected
-      ? json({ ok: true }, 200, origin)
-      : json({ error: "Invalid password" }, 401, origin);
-  }
-
-  static onBeforeRequest(req: Request, lobby: Party.Lobby) {
-    if (req.method !== "OPTIONS") return req;
-    const origin = allowedOrigin(req, lobby.env);
-    return origin ? new Response(null, { status: 204, headers: corsHeaders(origin) }) : new Response("Forbidden", { status: 403 });
-  }
-
-  static onBeforeConnect(req: Party.Request, lobby: Party.Lobby) {
-    const expected = appPassword(lobby.env);
-    if (!expected) return new Response("Server password is not configured", { status: 503 });
-    const params = new URL(req.url).searchParams;
-    const auth = params.get("auth");
-    const invite = params.get("invite");
-    if (auth === expected || invite) return req;
-    return new Response("Unauthorized", { status: 401 });
-  }
-
-  async onRequest(req: Party.Request) {
-    const origin = allowedOrigin(req, this.room.env);
+  async onRequest(req: Request): Promise<Response> {
+    const origin = allowedOrigin(req, this.env as Record<string, unknown>);
     if (new URL(req.url).pathname.split("/").pop() !== "invite" || req.method !== "POST" || !origin) {
       return json({ error: "Forbidden" }, 403, origin);
     }
-    const expected = appPassword(this.room.env);
+    const expected = appPassword(this.env as Record<string, unknown>);
     let payload: { password?: string; action?: string };
     try {
       payload = await req.json();
@@ -133,32 +123,35 @@ export default class ChatSignalingServer implements Party.Server {
     }
     if (!expected || payload.password !== expected) return json({ error: "Unauthorized" }, 401, origin);
     if (payload.action !== "get" && payload.action !== "rotate") return json({ error: "Invalid action" }, 400, origin);
-    let invite = await this.room.storage.get<string>(INVITE_KEY);
+    let invite = await this.ctx.storage.get<string>(INVITE_KEY);
     if (!invite || payload.action === "rotate") {
       invite = newInvite();
-      await this.room.storage.put(INVITE_KEY, invite);
+      await this.ctx.storage.put(INVITE_KEY, invite);
     }
     return json({ invite }, 200, origin);
   }
 
-  async onConnect(conn: Party.Connection) {
-    const params = new URL(conn.uri).searchParams;
-    const expected = appPassword(this.room.env);
+  async onConnect(conn: Connection, ctx: ConnectionContext) {
+    const requestUrl = ctx?.request?.url || conn.uri || "";
+    const params = new URL(requestUrl, "http://localhost").searchParams;
+    const expected = appPassword(this.env as Record<string, unknown>);
     const owner = !!expected && params.get("auth") === expected;
     const invite = params.get("invite");
-    const current = await this.room.storage.get<string>(INVITE_KEY);
+    const current = await this.ctx.storage.get<string>(INVITE_KEY);
     if (!owner && (!current || invite !== current)) {
       conn.close(4001, "invalid-invite");
       return;
     }
 
-    const connections = [...this.room.getConnections()].filter((peer) => peer.id !== conn.id && (peer.state as { authorized?: boolean } | null)?.authorized);
+    const connections = [...this.getConnections()].filter(
+      (peer) => peer.id !== conn.id && (peer.state as { authorized?: boolean } | null)?.authorized
+    );
     if (connections.length >= 50) {
       conn.send(JSON.stringify({ type: "room-full" }));
       conn.close(4000, "room-full");
       return;
     }
-    const fileApi = fileApiConfig(this.room.env);
+    const fileApi = fileApiConfig(this.env as Record<string, unknown>);
     let fileSessionToken: string | undefined;
     if (fileApi) {
       const token = randomToken();
@@ -169,15 +162,15 @@ export default class ChatSignalingServer implements Party.Server {
           body: JSON.stringify({
             sessionId: conn.id,
             tokenHash: await sha256(token),
-            roomId: this.room.id,
+            roomId: this.name,
             owner,
             expiresAt: Date.now() + 24 * 60 * 60 * 1000,
           }),
         });
         if (response.ok) fileSessionToken = token;
-        else console.error(`[PartyKit] File API rejected session registration (${response.status})`);
+        else console.error(`[PartyServer] File API rejected session registration (${response.status})`);
       } catch (error) {
-        console.error("[PartyKit] File API session registration failed", error);
+        console.error("[PartyServer] File API session registration failed", error);
       }
     }
     conn.setState({ authorized: true, owner, fileSession: !!fileSessionToken });
@@ -186,15 +179,17 @@ export default class ChatSignalingServer implements Party.Server {
     for (const [peerId, name] of this.peerNames.entries()) {
       if (peerId !== conn.id) peersSnapshot[peerId] = name;
     }
-    conn.send(JSON.stringify({
-      type: "room-joined",
-      numClients,
-      peerId: conn.id,
-      fileSessionToken,
-      history: this.history,
-      reactions: this.reactions,
-      peers: peersSnapshot,
-    }));
+    conn.send(
+      JSON.stringify({
+        type: "room-joined",
+        numClients,
+        peerId: conn.id,
+        fileSessionToken,
+        history: this.history,
+        reactions: this.reactions,
+        peers: peersSnapshot,
+      })
+    );
     if (numClients >= 2) {
       for (const peer of connections) {
         if (peer.id !== conn.id) peer.send(JSON.stringify({ type: "peer-joined", peerId: conn.id }));
@@ -202,9 +197,10 @@ export default class ChatSignalingServer implements Party.Server {
     }
   }
 
-  onMessage(message: string, sender: Party.Connection) {
+  onMessage(sender: Connection, rawMessage: WSMessage) {
     if (!(sender.state as { authorized?: boolean } | null)?.authorized) return;
     try {
+      const message = typeof rawMessage === "string" ? rawMessage : new TextDecoder().decode(rawMessage);
       const data = JSON.parse(message) as Record<string, unknown>;
       data.senderId = sender.id;
 
@@ -212,7 +208,10 @@ export default class ChatSignalingServer implements Party.Server {
         const cleanName = data.nickname.trim().slice(0, 60);
         if (cleanName) this.peerNames.set(sender.id, cleanName);
       } else if (data.type === "chat-text" && typeof data.content === "string") {
-        const senderName = (typeof data.senderName === "string" && data.senderName.trim()) || this.peerNames.get(sender.id) || "Unknown";
+        const senderName =
+          (typeof data.senderName === "string" && data.senderName.trim()) ||
+          this.peerNames.get(sender.id) ||
+          "Unknown";
         data.senderName = senderName;
         this.history.push({
           type: "chat-text",
@@ -225,7 +224,10 @@ export default class ChatSignalingServer implements Party.Server {
         });
         if (this.history.length > MAX_ROOM_HISTORY) this.history.shift();
       } else if (data.type === "file-ready" && typeof data.id === "string" && typeof data.name === "string") {
-        const senderName = (typeof data.senderName === "string" && data.senderName.trim()) || this.peerNames.get(sender.id) || "Unknown";
+        const senderName =
+          (typeof data.senderName === "string" && data.senderName.trim()) ||
+          this.peerNames.get(sender.id) ||
+          "Unknown";
         data.senderName = senderName;
         this.history.push({
           type: "file-ready",
@@ -255,22 +257,22 @@ export default class ChatSignalingServer implements Party.Server {
         this.reactions = {};
       }
 
-      for (const peer of this.room.getConnections()) {
+      for (const peer of this.getConnections()) {
         if (peer.id !== sender.id && (peer.state as { authorized?: boolean } | null)?.authorized) {
           peer.send(JSON.stringify(data));
         }
       }
     } catch {
-      console.warn("[PartyKit] Non-JSON message ignored");
+      console.warn("[PartyServer] Non-JSON message ignored");
     }
   }
 
-  async onClose(conn: Party.Connection) {
+  async onClose(conn: Connection) {
     if (!(conn.state as { authorized?: boolean } | null)?.authorized) return;
     conn.setState({ authorized: false });
     this.peerNames.delete(conn.id);
 
-    const fileApi = fileApiConfig(this.room.env);
+    const fileApi = fileApiConfig(this.env as Record<string, unknown>);
     if (fileApi && (conn.state as { fileSession?: boolean } | null)?.fileSession) {
       try {
         await fetch(`${fileApi.url}/internal/sessions/${encodeURIComponent(conn.id)}`, {
@@ -278,11 +280,11 @@ export default class ChatSignalingServer implements Party.Server {
           headers: { "X-Internal-Secret": fileApi.secret },
         });
       } catch (error) {
-        console.error("[PartyKit] File API session revocation failed", error);
+        console.error("[PartyServer] File API session revocation failed", error);
       }
     }
 
-    const remainingPeers = [...this.room.getConnections()].filter(
+    const remainingPeers = [...this.getConnections()].filter(
       (peer) => peer.id !== conn.id && (peer.state as { authorized?: boolean } | null)?.authorized
     );
     for (const peer of remainingPeers) {
@@ -296,8 +298,59 @@ export default class ChatSignalingServer implements Party.Server {
     }
   }
 
-  onError(conn: Party.Connection, err: Error) {
-    console.error(`[PartyKit] conn ${conn.id} error:`, err.message);
+  onError(conn: Connection, err: unknown) {
+    const message = err instanceof Error ? err.message : String(err);
+    console.error(`[PartyServer] conn ${conn.id} error:`, message);
   }
 }
 
+export default {
+  async fetch(request: Request, env: RelayEnv): Promise<Response> {
+    const url = new URL(request.url);
+    const origin = allowedOrigin(request, env as Record<string, unknown>);
+
+    if (request.method === "OPTIONS") {
+      return origin
+        ? new Response(null, { status: 204, headers: corsHeaders(origin) })
+        : new Response("Forbidden", { status: 403 });
+    }
+
+    if (url.pathname === "/auth/verify") {
+      if (!origin) return json({ error: "Forbidden" }, 403, null);
+      if (request.method !== "POST") return json({ error: "Method not allowed" }, 405, origin);
+      const expected = appPassword(env as Record<string, unknown>);
+      const supplied = await request.text();
+      return expected && supplied === expected
+        ? json({ ok: true }, 200, origin)
+        : json({ error: "Invalid password" }, 401, origin);
+    }
+
+    // PartySocket connects to /parties/main/:room by default
+    const serverEnv = {
+      ...env,
+      main: env.ChatSignalingServer || env.main,
+    };
+
+    const response = await routePartykitRequest(request, serverEnv as any, {
+      onBeforeConnect(req) {
+        const expected = appPassword(env as Record<string, unknown>);
+        if (!expected) return new Response("Server password is not configured", { status: 503 });
+        const params = new URL(req.url).searchParams;
+        const auth = params.get("auth");
+        const invite = params.get("invite");
+        if (auth === expected || invite) return req;
+        return new Response("Unauthorized", { status: 401 });
+      },
+      onBeforeRequest(req) {
+        if (req.method === "OPTIONS") {
+          return origin ? new Response(null, { status: 204, headers: corsHeaders(origin) }) : new Response("Forbidden", { status: 403 });
+        }
+        return req;
+      },
+    });
+
+    if (response) return response;
+
+    return new Response("Not found", { status: 404 });
+  },
+};
